@@ -1,0 +1,19 @@
+# Helm values for prometheus-community/prometheus-adapter. Not a Kubernetes
+# resource and not part of the kustomization. Merge into your adapter install:
+#   helm upgrade --install prometheus-adapter prometheus-community/prometheus-adapter \
+#     -n monitoring -f deploy/k8s/components/hpa/prometheus-adapter-values.yaml
+prometheus:
+  url: http://prometheus-operated.monitoring.svc
+  port: 9090
+rules:
+  default: false
+  custom:
+    - seriesQuery: 'wavy_active_transcodes{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: { resource: namespace }
+          pod: { resource: pod }
+      name:
+        matches: ^wavy_active_transcodes$
+        as: wavy_active_transcodes
+      metricsQuery: max(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)

@@ -1,0 +1,43 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: wavy
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: wavy-server
+      app.kubernetes.io/part-of: wavy
+    includeSelectors: true
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - smb-storage.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - pdb.yaml
+
+configMapGenerator:
+  # Service settings. A change rolls the pods (the generated name gets a new hash).
+  - name: wavy-server-env
+    literals:
+      - PORT=8080
+      - MEDIA_ROOT=/media
+      - SESSIONS_DIR=/tmp/sessions
+      - PLAYBACK_RULES=/etc/wavy/playback-rules.json
+      - MAX_TRANSCODES=4
+      - MAX_SESSIONS=50
+      - SESSION_IDLE_TIMEOUT_MS=60000
+      - PLAYLIST_WAIT_MS=15000
+      - HLS_SEGMENT_TYPE=fmp4
+      # Cookie affinity needs credentialed requests, which browsers refuse with
+      # "*". Overlays set the web app's origin(s), comma-separated.
+      - CORS_ORIGINS=*
+      - LOG_LEVEL=info
+  # The codec -> mode decision table. Kept in sync with config/playback-rules.json
+  # by CI (deploy/k8s/validate.sh fails if the two differ). Overlays can replace it.
+  - name: wavy-playback-rules
+    files:
+      - playback-rules.json
+

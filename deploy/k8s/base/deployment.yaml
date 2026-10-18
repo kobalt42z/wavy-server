@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wavy-server
+spec:
+  # The autoscaler component (hpa or keda) owns the replica count once applied.
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      annotations:
+        # For Prometheus setups that discover targets from pod annotations.
+        # With the Prometheus Operator use components/prometheus-operator instead.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: wavy-server
+      automountServiceAccountToken: false
+      # Long enough for in-flight segment requests to finish after the pod
+      # leaves the load balancer. Active transcodes on a stopping pod are lost;
+      # the player starts a new session on another pod.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: wavy-server
+      containers:
+        - name: wavy-server
+          image: ghcr.io/kobalt42z/wavy-server:latest # overlays pin a tag
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: wavy-server-env
+          # Requests equal limits (Guaranteed QoS): CFS throttling makes
+          # real-time encodes stutter. Memory: ~200 MB base + ~600 MB per
+          # concurrent 1080p transcode, for MAX_TRANSCODES=4.
+          resources:
+            requests:
+              cpu: "4"
+              memory: 3Gi
+              ephemeral-storage: 4Gi
+            limits:
+              cpu: "4"
+              memory: 3Gi
+              ephemeral-storage: 24Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Give the ingress time to drop this pod before SIGTERM.
+              exec:
+                command: ["sleep", "5"]
+          volumeMounts:
+            - name: media
+              mountPath: /media
+              readOnly: true
+            - name: scratch
+              mountPath: /tmp # HLS segments go to /tmp/sessions
+            - name: rules
+              mountPath: /etc/wavy
+              readOnly: true
+      volumes:
+        - name: media
+          persistentVolumeClaim:
+            claimName: wavy-media
+            readOnly: true
+        - name: scratch
+          # Local disk, not memory: ~40 MB per minute of transcoded video, and a
+          # memory-backed emptyDir would count against the 3Gi limit.
+          emptyDir:
+            sizeLimit: 20Gi
+        - name: rules
+          configMap:
+            name: wavy-playback-rules
