@@ -1,0 +1,7 @@
+# Autoscale on active full transcodes with a plain HorizontalPodAutoscaler.
+# Needs prometheus-adapter exposing wavy_active_transcodes on the custom metrics
+# API; prometheus-adapter-values.yaml has the rule.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - hpa.yaml

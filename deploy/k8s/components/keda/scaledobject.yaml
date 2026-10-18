@@ -1,0 +1,36 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: wavy-server
+spec:
+  scaleTargetRef:
+    name: wavy-server
+  minReplicaCount: 2
+  maxReplicaCount: 10
+  pollingInterval: 15
+  cooldownPeriod: 600
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Pods
+              value: 4
+              periodSeconds: 30
+        scaleDown:
+          # Removing a pod kills its sessions, so scale down slowly.
+          stabilizationWindowSeconds: 600
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 300
+  triggers:
+    # Total transcodes across pods; KEDA divides by the threshold to get the
+    # replica count, i.e. a target of 3 per pod (MAX_TRANSCODES=4).
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-operated.monitoring.svc:9090
+        query: sum(wavy_active_transcodes{namespace="wavy"})
+        threshold: "3"
+        ignoreNullValues: "true"

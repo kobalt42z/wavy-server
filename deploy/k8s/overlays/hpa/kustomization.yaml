@@ -1,0 +1,38 @@
+# Example environment using components/hpa. Copy this folder per cluster and set
+# the share, host and image tag.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: wavy
+
+resources:
+  - ../../base
+
+components:
+  - ../../components/prometheus-operator
+  - ../../components/hpa
+
+images:
+  - name: ghcr.io/kobalt42z/wavy-server
+    newTag: "0.1.0"
+
+patches:
+  # Point the PersistentVolume at the real share.
+  - target:
+      kind: PersistentVolume
+      name: wavy-media
+    patch: |-
+      - op: replace
+        path: /spec/csi/volumeAttributes/source
+        value: //fileserver.example.local/media
+  # Public host for the playback API.
+  - target:
+      kind: Ingress
+      name: wavy-server
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: wavy.example.local
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: wavy.example.local

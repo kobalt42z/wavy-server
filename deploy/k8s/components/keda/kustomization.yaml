@@ -1,0 +1,6 @@
+# Autoscale on active full transcodes with KEDA, querying Prometheus directly.
+# Use instead of components/hpa (KEDA creates its own HPA).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - scaledobject.yaml
