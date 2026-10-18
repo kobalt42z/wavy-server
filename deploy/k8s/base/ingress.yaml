@@ -1,0 +1,50 @@
+# ingress-nginx. A playback session (its FFmpeg process and HLS segments) lives on
+# one pod, so every request from a browser must reach the pod that created its
+# session. The ingress sets a cookie on the first response and routes on it.
+#
+# If the web app is on another origin, the player must send credentials so the
+# cookie comes back (hls.js: xhrSetup: xhr => { xhr.withCredentials = true }), and
+# the service must answer CORS with Access-Control-Allow-Credentials.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: wavy-server
+  annotations:
+    nginx.ingress.kubernetes.io/affinity: cookie
+    # persistent: scaling up doesn't move existing browsers to new pods.
+    nginx.ingress.kubernetes.io/affinity-mode: persistent
+    nginx.ingress.kubernetes.io/session-cookie-name: WAVY_AFFINITY
+    nginx.ingress.kubernetes.io/session-cookie-path: /
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "28800"
+    nginx.ingress.kubernetes.io/session-cookie-samesite: None
+    nginx.ingress.kubernetes.io/session-cookie-conditional-samesite-none: "true"
+    nginx.ingress.kubernetes.io/session-cookie-secure: "true"
+    # A pod at its transcode cap answers 503 before creating anything, so it is
+    # safe to retry that request (POST included) on another pod; the cookie
+    # then moves to the pod that accepted it.
+    nginx.ingress.kubernetes.io/session-cookie-change-on-failure: "true"
+    nginx.ingress.kubernetes.io/proxy-next-upstream: http_503 non_idempotent
+    nginx.ingress.kubernetes.io/proxy-next-upstream-tries: "3"
+    # Segments can take a few seconds while FFmpeg catches up after a seek.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    # Stream large direct-mode files instead of buffering them on the ingress.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-body-size: 1m
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - wavy.example.local
+      secretName: wavy-server-tls
+  rules:
+    - host: wavy.example.local # overlays set the real host
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: wavy-server
+                port:
+                  name: http

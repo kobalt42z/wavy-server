@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: wavy-server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: wavy-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  # In-cluster callers stick to one pod too. The ingress talks to pods
+  # directly and uses its own cookie affinity (ingress.yaml).
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800

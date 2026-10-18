@@ -1,0 +1,36 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: wavy-server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: wavy-server
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    # Scale on transcodes, not CPU: an idle pod and a pod running 4 encodes can
+    # both sit near 100% CPU for a moment, and remux sessions are nearly free.
+    # Target 3 per pod so a new pod is ready before pods hit MAX_TRANSCODES=4.
+    - type: Pods
+      pods:
+        metric:
+          name: wavy_active_transcodes
+        target:
+          type: AverageValue
+          averageValue: "3"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+    scaleDown:
+      # Removing a pod kills its sessions, so scale down slowly.
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 300

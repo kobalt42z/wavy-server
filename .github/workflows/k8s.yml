@@ -1,0 +1,61 @@
+name: Kubernetes manifests
+
+on:
+  push:
+    branches: [main, dev]
+    paths: ["deploy/k8s/**", "config/playback-rules.json", ".github/workflows/k8s.yml"]
+  pull_request:
+    paths: ["deploy/k8s/**", "config/playback-rules.json", ".github/workflows/k8s.yml"]
+
+env:
+  KUSTOMIZE_VERSION: 5.7.1
+  KUBECONFORM_VERSION: 0.7.0
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Install kustomize and kubeconform
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -sSfL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" | tar xz -C "$HOME/bin" kustomize
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" | tar xz -C "$HOME/bin" kubeconform
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+      - run: bun install --frozen-lockfile
+      - name: Typecheck the invariant checker
+        run: bunx tsc --noEmit -p deploy/k8s
+      - name: Validate manifests
+        run: deploy/k8s/validate.sh
+
+  # Server-side dry run against a real API server: catches what schemas miss
+  # (immutable fields, admission defaults, CRD validation).
+  dry-run:
+    runs-on: ubuntu-24.04
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: wavy
+      - name: Install CRDs (KEDA, Prometheus Operator ServiceMonitor)
+        run: |
+          kubectl apply --server-side -f https://github.com/kedacore/keda/releases/download/v2.17.2/keda-2.17.2-crds.yaml
+          kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.85.0/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
+          # A just-created CRD can have no status yet, which makes `kubectl wait` fail
+          # at once instead of waiting, so retry until both are established.
+          for i in $(seq 1 30); do
+            kubectl wait --for condition=established --timeout=10s crd/scaledobjects.keda.sh crd/servicemonitors.monitoring.coreos.com && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: Server-side dry run
+        run: |
+          kubectl create namespace wavy
+          for dir in overlays/hpa overlays/keda; do
+            echo "• $dir"
+            kubectl kustomize "deploy/k8s/$dir" | kubectl apply --dry-run=server -f -
+          done

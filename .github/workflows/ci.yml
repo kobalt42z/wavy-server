@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+
+  angular-client:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: clients/angular
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: clients/angular/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t wavy-server:ci .
+      - name: Smoke test (non-root, read-only root filesystem, read-only media)
+        run: |
+          mkdir -p media
+          docker run --rm --user 0 -v "$PWD/media:/out" --entrypoint ffmpeg wavy-server:ci -hide_banner -loglevel error \
+            -f lavfi -i testsrc2=size=320x240:rate=25:duration=6 -f lavfi -i sine=duration=6 \
+            -c:v mpeg2video -c:a ac3 /out/clip.ts
+          docker run -d --name wavy -p 8080:8080 --read-only --tmpfs /tmp:uid=1000,gid=1000 \
+            -v "$PWD/media:/media:ro" wavy-server:ci
+          for i in $(seq 1 30); do curl -fsS localhost:8080/healthz && break; sleep 1; done
+          test "$(docker exec wavy id -u)" = 1000
+          curl -fsS "localhost:8080/api/probe?path=clip.ts" | tee /dev/stderr | grep -q '"mode":"transcode"'
+          url=$(curl -fsS -X POST localhost:8080/api/sessions -H 'Content-Type: application/json' -d '{"path":"clip.ts"}' | tee /dev/stderr | jq -r .url)
+          curl -fsS "localhost:8080$url" | tee /dev/stderr | grep -q '#EXTINF'
+          curl -fsS localhost:8080/metrics | grep -q '^wavy_active_transcodes 1'
+      - name: Container logs
+        if: always()
+        run: docker logs wavy || true
