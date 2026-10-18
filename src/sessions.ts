@@ -116,7 +116,7 @@ export class SessionManager {
       decision: input.decision,
       probe: input.probe,
       dir: mode === "direct" ? "" : join(this.cfg.sessionsDir, id),
-      start: mode === "direct" ? 0 : clampStart(input.start, input.probe.duration),
+      start: clampStart(input.start, input.probe.duration),
       generation: 0,
       createdAt: t,
       lastAccess: t,

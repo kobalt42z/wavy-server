@@ -16,9 +16,11 @@ COPY config ./config
 ENV NODE_ENV=production \
     PORT=8080 \
     MEDIA_ROOT=/media \
-    SESSIONS_DIR=/tmp/sessions
+    SESSIONS_DIR=/tmp/sessions \
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
 
-# Non-root (the image's "bun" user, uid 1000). /media is mounted read-only.
+# Non-root (the image's "bun" user, uid 1000). /media is mounted read-only; the root
+# filesystem can be read-only too as long as /tmp is writable.
 RUN mkdir -p /tmp/sessions /media && chown 1000:1000 /tmp/sessions
 USER 1000:1000
 
