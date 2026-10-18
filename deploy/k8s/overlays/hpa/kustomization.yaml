@@ -16,6 +16,12 @@ images:
   - name: ghcr.io/kobalt42z/wavy-server
     newTag: "0.1.0"
 
+configMapGenerator:
+  - name: wavy-server-env
+    behavior: merge
+    literals:
+      - CORS_ORIGINS=https://app.example.local
+
 patches:
   # Point the PersistentVolume at the real share.
   - target:

@@ -25,9 +25,15 @@ configMapGenerator:
       - PORT=8080
       - MEDIA_ROOT=/media
       - SESSIONS_DIR=/tmp/sessions
-      - RULES_PATH=/etc/wavy/playback-rules.json
+      - PLAYBACK_RULES=/etc/wavy/playback-rules.json
       - MAX_TRANSCODES=4
-      - SESSION_IDLE_TIMEOUT_SECONDS=60
+      - MAX_SESSIONS=50
+      - SESSION_IDLE_TIMEOUT_MS=60000
+      - PLAYLIST_WAIT_MS=15000
+      - HLS_SEGMENT_TYPE=fmp4
+      # Cookie affinity needs credentialed requests, which browsers refuse with
+      # "*". Overlays set the web app's origin(s), comma-separated.
+      - CORS_ORIGINS=*
       - LOG_LEVEL=info
   # The codec -> mode decision table. Kept in sync with config/playback-rules.json
   # by CI (deploy/k8s/validate.sh fails if the two differ). Overlays can replace it.

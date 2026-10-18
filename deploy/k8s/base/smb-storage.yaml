@@ -21,8 +21,8 @@ spec:
     - vers=3.0
     - dir_mode=0555
     - file_mode=0444
-    - uid=10001
-    - gid=10001
+    - uid=1000
+    - gid=1000
     - noperm
     - actimeo=30
   csi:
