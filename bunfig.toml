@@ -1,0 +1,3 @@
+[test]
+# FFmpeg-backed tests are slower on small CI runners than the 5 s default allows.
+timeout = 30000

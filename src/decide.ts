@@ -51,7 +51,12 @@ export function unsupported(reason: string): Decision {
 }
 
 /** Picks the cheapest playback mode for a probed file. Video and audio are decided independently. */
-export function decide(probe: ProbeResult, ext: string, rules: PlaybackRules): Decision {
+export function decide(
+  probe: ProbeResult,
+  ext: string,
+  rules: PlaybackRules,
+  opts: { allowDirect?: boolean } = {},
+): Decision {
   const extReason = checkExtension(ext, rules);
   if (extReason) return unsupported(extReason);
 
@@ -59,7 +64,8 @@ export function decide(probe: ProbeResult, ext: string, rules: PlaybackRules): D
   const a = probe.audio[0];
   if (!v && !a) return unsupported("The file has no audio or video stream.");
 
-  const direct = matchDirect(probe, ext, v, a, rules);
+  // allowDirect: false forces HLS, e.g. when the viewer picks a non-default audio track.
+  const direct = opts.allowDirect === false ? null : matchDirect(probe, ext, v, a, rules);
   if (direct) {
     return {
       mode: "direct",
