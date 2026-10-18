@@ -1,0 +1,17 @@
+{
+  "name": "wavy-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Web playback service: probes media files and serves them to Chrome directly or as HLS via FFmpeg.",
+  "scripts": {
+    "samples": "bun scripts/generate-samples.ts",
+    "scan": "bun scripts/scan.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.3",
+    "typescript": "^5.9.3"
+  }
+}
