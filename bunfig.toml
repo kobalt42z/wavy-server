@@ -1,0 +1,3 @@
+[test]
+# Only the server tests; clients/ have their own test runners.
+root = "test"
