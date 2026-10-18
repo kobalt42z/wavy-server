@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Wavy test player</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f7f9;
+        --panel: #ffffff;
+        --text: #1b1f24;
+        --muted: #5b6470;
+        --border: #d8dde3;
+        --accent: #2563eb;
+        --error-bg: #fdecec;
+        --error-text: #8a1c1c;
+        --track: #d8dde3;
+        --avail: #9db8f0;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #111418;
+          --panel: #1a1f25;
+          --text: #e6e9ed;
+          --muted: #98a2ae;
+          --border: #2c333b;
+          --accent: #6b9bff;
+          --error-bg: #3a1a1a;
+          --error-text: #ffb4b4;
+          --track: #2c333b;
+          --avail: #34508a;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 24px 16px;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main { max-width: 960px; margin: 0 auto; display: grid; gap: 16px; }
+      h1 { font-size: 20px; margin: 0; }
+      .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+      form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+      label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+      label.grow { flex: 1 1 320px; }
+      input[type="text"], input[type="number"] {
+        font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+        background: var(--bg); color: var(--text); width: 100%;
+      }
+      input[type="number"] { width: 110px; }
+      button {
+        font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border);
+        background: var(--panel); color: var(--text); cursor: pointer;
+      }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .stage { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
+      video { display: block; width: 100%; max-height: 60vh; background: #000; }
+      .stage.audio video { height: 64px; }
+      .overlay {
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        color: #fff; background: rgba(0, 0, 0, 0.45); font-size: 15px;
+      }
+      .controls { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+      .controls .time { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+      input[type="range"].seek {
+        flex: 1; appearance: none; height: 6px; border-radius: 3px; cursor: pointer;
+        background: linear-gradient(to right, var(--avail) var(--avail-pct, 0%), var(--track) var(--avail-pct, 0%));
+      }
+      input[type="range"].seek::-webkit-slider-thumb {
+        appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent);
+      }
+      .message {
+        border-radius: 8px; padding: 14px 16px; background: var(--error-bg); color: var(--error-text);
+        border: 1px solid transparent;
+      }
+      .message strong { display: block; margin-bottom: 2px; }
+      dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+      dt { color: var(--muted); }
+      dd { margin: 0; overflow-wrap: anywhere; }
+      .badge {
+        display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px;
+        border: 1px solid var(--border);
+      }
+      .hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Wavy test player</h1>
+
+      <section class="panel">
+        <form id="open-form">
+          <label class="grow">
+            File path (relative to the media root)
+            <input id="path" type="text" placeholder="cctv/2026-10-01/cam3.dav" autocomplete="off" required />
+          </label>
+          <label>
+            Start at (s)
+            <input id="start" type="number" min="0" step="1" value="0" />
+          </label>
+          <button class="primary" type="submit" id="play-btn">Play</button>
+          <button type="button" id="stop-btn" disabled>Stop</button>
+        </form>
+        <p class="hint">Tip: open this page with <code>?path=&lt;file&gt;</code> to start a file straight away.</p>
+      </section>
+
+      <div id="message" class="message" role="alert" hidden></div>
+
+      <section id="player-panel" class="panel" hidden>
+        <div class="stage" id="stage">
+          <video id="video" playsinline></video>
+          <div class="overlay" id="overlay" hidden></div>
+        </div>
+        <div class="controls">
+          <button type="button" id="toggle-btn" aria-label="Play or pause">Play</button>
+          <span class="time" id="time-current">0:00</span>
+          <input class="seek" id="seek" type="range" min="0" max="0" step="0.1" value="0" aria-label="Seek" />
+          <span class="time" id="time-total">--:--</span>
+          <button type="button" id="mute-btn">Mute</button>
+          <button type="button" id="fullscreen-btn">Full screen</button>
+        </div>
+        <p class="hint">The lighter part of the bar is ready to play. Seeking past it asks the server to restart at that point.</p>
+      </section>
+
+      <section id="info-panel" class="panel" hidden>
+        <dl id="info"></dl>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
