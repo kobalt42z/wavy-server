@@ -17,7 +17,7 @@ Start the playback service, then:
 
 ```bash
 bun player/serve.js                                   # http://localhost:5173
-WAVY_API_URL=http://localhost:3000 PORT=5173 bun player/serve.js
+WAVY_API_URL=http://localhost:8080 PORT=5173 bun player/serve.js
 ```
 
 Type a path relative to the media root and press Play, or open

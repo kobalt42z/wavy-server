@@ -3,10 +3,10 @@
 // (no CORS needed).
 //
 //   bun player/serve.js
-//   WAVY_API_URL=http://localhost:3000 PORT=5173 bun player/serve.js
+//   WAVY_API_URL=http://localhost:8080 PORT=5173 bun player/serve.js
 import { join } from "node:path";
 
-const API = (process.env.WAVY_API_URL ?? "http://localhost:3000").replace(/\/+$/, "");
+const API = (process.env.WAVY_API_URL ?? "http://localhost:8080").replace(/\/+$/, "");
 const PORT = Number(process.env.PORT ?? 5173);
 const ROOT = import.meta.dir;
 
