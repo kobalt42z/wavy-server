@@ -1,0 +1,50 @@
+# The media share, mounted read-only through the SMB CSI driver
+# (https://github.com/kubernetes-csi/csi-driver-smb). Originals are never modified:
+# the volume is read-only at the PV, the PVC, the pod volume and the container mount.
+#
+# The credentials Secret is not part of this kustomization. Create it once, using a
+# read-only account on the file server (see deploy/k8s/README.md):
+#   kubectl -n wavy create secret generic wavy-smb-credentials \
+#     --from-literal=username=svc-wavy-ro --from-literal=password='...'
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: wavy-media
+spec:
+  capacity:
+    storage: 1Ti # nominal; SMB ignores it
+  accessModes:
+    - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  mountOptions:
+    - vers=3.0
+    - dir_mode=0555
+    - file_mode=0444
+    - uid=1000
+    - gid=1000
+    - noperm
+    - actimeo=30
+  csi:
+    driver: smb.csi.k8s.io
+    readOnly: true
+    # Must be unique in the cluster.
+    volumeHandle: wavy-media-share
+    volumeAttributes:
+      source: //fileserver.example.local/media # overlays set the real share
+    nodeStageSecretRef:
+      name: wavy-smb-credentials
+      namespace: wavy
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wavy-media
+spec:
+  accessModes:
+    - ReadOnlyMany
+  storageClassName: ""
+  volumeName: wavy-media
+  resources:
+    requests:
+      storage: 1Ti

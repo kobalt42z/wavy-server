@@ -1,0 +1,52 @@
+{
+  "allowedExtensions": [
+    "mp4", "m4v", "mov", "mts", "m2ts", "ts", "mpg", "mpeg", "vob", "avi", "asf", "wmv", "dav",
+    "264", "h264", "265", "hevc", "webm",
+    "mp3", "aac", "m4a", "wav", "opus", "ogg", "oga", "wma", "tak", "flac"
+  ],
+  "blockedExtensions": {
+    "g64x": "g64x is a Genetec proprietary format. Export it from Genetec Security Center first.",
+    "prproj": "prproj is an Adobe Premiere project file, not media.",
+    "pkf": "pkf is an Adobe Audition waveform cache file, not media.",
+    "sys": "sys is a system file, not media."
+  },
+  "inputOverrides": {
+    "264": { "args": ["-f", "h264", "-framerate", "25"] },
+    "h264": { "args": ["-f", "h264", "-framerate", "25"] },
+    "265": { "args": ["-f", "hevc", "-framerate", "25"] },
+    "hevc": { "args": ["-f", "hevc", "-framerate", "25"] }
+  },
+  "probeFallbackFormats": ["mpeg"],
+  "direct": [
+    {
+      "name": "mp4",
+      "formats": ["mp4", "mov"],
+      "extensions": ["mp4", "m4v", "m4a"],
+      "videoCodecs": ["h264"],
+      "audioCodecs": ["aac", "mp3", "opus", "flac"]
+    },
+    {
+      "name": "webm",
+      "formats": ["webm", "matroska"],
+      "extensions": ["webm"],
+      "videoCodecs": ["vp8", "vp9", "av1"],
+      "audioCodecs": ["opus", "vorbis"]
+    },
+    { "name": "mp3", "formats": ["mp3"], "audioCodecs": ["mp3"] },
+    { "name": "aac", "formats": ["aac"], "audioCodecs": ["aac"] },
+    { "name": "wav", "formats": ["wav"], "audioCodecs": ["pcm_u8", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le"] },
+    { "name": "ogg", "formats": ["ogg"], "audioCodecs": ["vorbis", "opus", "flac"] },
+    { "name": "flac", "formats": ["flac"], "audioCodecs": ["flac"] }
+  ],
+  "copy": {
+    "videoCodecs": ["h264"],
+    "videoPixelFormats": ["yuv420p", "yuvj420p"],
+    "maxVideoHeight": 2160,
+    "audioCodecs": ["aac"],
+    "maxAudioChannels": 2
+  },
+  "allowHevcPassthrough": false,
+  "transcode": {
+    "maxHeight": 1080
+  }
+}

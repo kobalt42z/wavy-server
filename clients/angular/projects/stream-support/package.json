@@ -1,0 +1,14 @@
+{
+  "name": "@wavy/stream-support",
+  "version": "0.0.1",
+  "peerDependencies": {
+    "@angular/common": "^21.2.0",
+    "@angular/core": "^21.2.0",
+    "hls.js": "^1.5.0"
+  },
+  "dependencies": {
+    "tslib": "^2.3.0"
+  },
+  "sideEffects": false,
+  "description": "Angular directive that plays wavy playback-service streams (direct files or HLS) in a native video element."
+}
