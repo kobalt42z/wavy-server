@@ -116,6 +116,16 @@ docker run -p 8080:8080 -v /path/to/media:/media:ro --read-only --tmpfs /tmp wav
 The image is `oven/bun` slim with Debian's FFmpeg, runs as uid 1000 under `tini`, and
 works with a read-only root filesystem as long as `/tmp` is writable.
 
+Prebuilt images (linux/amd64 and linux/arm64) are published to GHCR by
+`.github/workflows/release.yml`:
+
+```bash
+docker pull ghcr.io/kobalt42z/wavy-server:0.1.0   # a release (also :0.1, :latest)
+docker pull ghcr.io/kobalt42z/wavy-server:dev     # tip of dev (also :main, :sha-<short>)
+```
+
+To cut a release, push a `v*` tag, for example `git tag v0.1.0 && git push origin v0.1.0`.
+
 ## Playback modes
 
 | Mode | Meaning |
