@@ -50,7 +50,8 @@ jobs:
           docker run -d --name wavy -p 8080:8080 --read-only --tmpfs /tmp:uid=1000,gid=1000 \
             -v "$PWD/media:/media:ro" wavy-server:ci
           for i in $(seq 1 30); do curl -fsS localhost:8080/healthz && break; sleep 1; done
-          test "$(docker exec wavy id -u)" = 1000
+          # Distroless has no shell or coreutils, so ask Bun for the uid.
+          test "$(docker exec wavy bun -e 'console.log(process.getuid())')" = 1000
           curl -fsS "localhost:8080/api/probe?path=clip.ts" | tee /dev/stderr | grep -q '"mode":"transcode"'
           url=$(curl -fsS -X POST localhost:8080/api/sessions -H 'Content-Type: application/json' -d '{"path":"clip.ts"}' | tee /dev/stderr | jq -r .url)
           curl -fsS "localhost:8080$url" | tee /dev/stderr | grep -q '#EXTINF'
@@ -58,3 +59,13 @@ jobs:
       - name: Container logs
         if: always()
         run: docker logs wavy || true
+      # Prints every finding, then fails on any CRITICAL or HIGH one (the usual bar for
+      # a corporate image scan). Trivy runs from its image pinned by digest.
+      - name: CVE scan (Trivy)
+        run: |
+          trivy() {
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache \
+              aquasec/trivy:0.67.2@sha256:e2b22eac59c02003d8749f5b8d9bd073b62e30fefaef5b7c8371204e0a4b0c08 "$@"
+          }
+          trivy image --scanners vuln wavy-server:ci
+          trivy image --scanners vuln --skip-db-update --severity CRITICAL,HIGH --exit-code 1 wavy-server:ci
