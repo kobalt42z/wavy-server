@@ -1,13 +1,14 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { join } from "node:path";
-import { authenticate, canUseSession, createAuth, type AppEnv } from "./auth.ts";
+import { authenticate, canUseSession, createAuth, grantLabel, type AppEnv } from "./auth.ts";
 import type { Config } from "./config.ts";
 import { serveFile } from "./files.ts";
 import { PLAYLIST_NAME, SEGMENT_NAME, segmentContentType } from "./hls.ts";
 import { ApiError, badRequest, notFound } from "./http/errors.ts";
 import { log } from "./log.ts";
-import { resolveMediaPath, type MediaFile } from "./media-path.ts";
+import { resolveMediaPath, stripRootPrefix, type MediaFile } from "./media-path.ts";
+import { isRemoteUrl, openRemote, redactUrl, remoteInputArgs, serveRemote } from "./remote.ts";
 import type { Metrics } from "./metrics.ts";
 import { PlaybackAnalyzer, unsupportedError } from "./playback.ts";
 import type { PlaybackRules } from "./rules.ts";
@@ -25,8 +26,10 @@ const FILES_PREFIX = "/api/files/";
 const SESSION_FILE_NAME = "file";
 
 export function createApp({ config, rules, metrics, sessions }: AppDeps) {
-  const analyzer = new PlaybackAnalyzer(rules, metrics, config.ffprobePath);
-  const auth = createAuth(config.auth);
+  const analyzer = new PlaybackAnalyzer(rules, metrics, config.ffprobePath, 1000, (url) =>
+    remoteInputArgs(config.remote, url),
+  );
+  const auth = createAuth(config.auth, config.mediaPathPrefixes);
   const app = new Hono<AppEnv>();
 
   app.onError((err, c) => {
@@ -62,21 +65,33 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
   app.on("POST", "/api/sessions", auth.requireGrant);
   app.use(`${FILES_PREFIX}*`, auth.requireGrant);
 
-  /** Resolves a client path and checks the viewer's token covers it. */
+  /**
+   * Resolves a client path (a share path, or an http(s) URL from a URL grant) and
+   * checks the viewer's token covers it.
+   */
   const openFile = async (c: Context<AppEnv>, path: string | undefined): Promise<MediaFile> => {
-    const file = await resolveMediaPath(config.mediaRoot, path);
-    if (!auth.allows(c.get("user"), file.relPath, file.realRelPath)) {
-      log("warn", "access_denied", { user: c.get("user")?.id, grant: c.get("user")?.grant?.path, path: file.relPath });
+    const user = c.get("user");
+    // A share grant never opens a URL, so a URL is only fetched when the token names it.
+    // Checked before anything is fetched.
+    if (isRemoteUrl(path) && auth.enabled && !(user?.grant?.remote && sameUrl(path, user.grant.path))) {
+      log("warn", "access_denied", { user: user?.id, grant: grantLabel(user?.grant), path: redactUrl(path) });
+      throw new ApiError(403, "forbidden", "Your access token does not cover this file.");
+    }
+    const file = isRemoteUrl(path)
+      ? await openRemote(path, config.remote)
+      : await resolveMediaPath(config.mediaRoot, path === undefined ? path : stripRootPrefix(path, config.mediaPathPrefixes));
+    if (!auth.allows(user, file)) {
+      log("warn", "access_denied", { user: user?.id, grant: grantLabel(user?.grant), path: file.relPath });
       throw new ApiError(403, "forbidden", "Your access token does not cover this file.");
     }
     return file;
   };
 
-  /** The path in the body, or the token's file when the body has none. */
-  const requestedPath = (c: Context<AppEnv>, body: Record<string, unknown>): string | undefined => {
-    if (typeof body.path === "string") return body.path;
+  /** The path in the request, or the token's file (or URL) when the request has none. */
+  const requestedPath = (c: Context<AppEnv>, given: unknown): string | undefined => {
+    if (typeof given === "string") return given;
     const grant = c.get("user")?.grant;
-    return grant && !grant.path.endsWith("/") ? grant.path : undefined;
+    return grant && (grant.remote || !grant.path.endsWith("/")) ? grant.path : undefined;
   };
 
   const sessionFor = (c: Context<AppEnv>): Session => {
@@ -92,7 +107,7 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
   const sessionUrl = (s: Session) => (s.mode === "direct" ? fileUrl(s) : playlistUrl(s));
 
   app.get("/api/probe", async (c) => {
-    const file = await openFile(c, c.req.query("path"));
+    const file = await openFile(c, requestedPath(c, c.req.query("path")));
     const analysis = await analyzer.analyze(file);
     return c.json(analyzer.toResponse(file, analysis));
   });
@@ -102,7 +117,7 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
     const start = optionalNumber(body.start, "start", 0);
     const audioTrack = optionalNumber(body.audioTrack, "audioTrack", 0);
     if (audioTrack !== undefined && !Number.isInteger(audioTrack)) throw badRequest("audioTrack must be an integer.");
-    const file = await openFile(c, requestedPath(c, body));
+    const file = await openFile(c, requestedPath(c, body.path));
 
     const analysis = await analyzer.analyze(file);
     if (analysis.decision.mode === "unsupported" || !analysis.probe) {
@@ -118,6 +133,7 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
       tokenId: user?.grant?.tokenId ?? null,
       relPath: file.relPath,
       absPath: file.absPath,
+      remoteFile: file.remote ? file : undefined,
       extension: analyzer.label(analysis.extension),
       decision,
       probe,
@@ -167,6 +183,7 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
     const s = sessionFor(c);
     if (s.mode !== "direct") throw notFound("HLS sessions serve a playlist, not the file.");
     sessions.touch(s);
+    if (s.remoteFile) return serveRemote(s.remoteFile, c.req.raw, config.remote);
     // Resolved again so a file that was moved or replaced is never served stale.
     return serveFile(await resolveMediaPath(config.mediaRoot, s.relPath), c.req.raw);
   });
@@ -231,6 +248,14 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
   app.on(["GET", "HEAD"], `${FILES_PREFIX}*`, filesHandler);
 
   return app;
+}
+
+function sameUrl(a: string, b: string): boolean {
+  try {
+    return new URL(a.trim()).toString() === new URL(b.trim()).toString();
+  } catch {
+    return false;
+  }
 }
 
 async function readJson(c: Context): Promise<Record<string, unknown>> {

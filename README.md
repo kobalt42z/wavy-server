@@ -99,9 +99,39 @@ payload { "sub": "user-42", "path": "cases/12/cam3.mp4", "iss": "main", "aud": "
 - `bun scripts/gen-token-keys.ts keys k1` makes an Ed25519 key pair: the private key
   for the main server, `keys/jwks.json` for wavy.
 
+- A token whose `path` is an `http(s)` URL (an S3 presigned link, for example) plays
+  from that URL instead of the share; see "Remote sources".
+
 `AUTH_MODE=none` (the default, for development and tests) leaves the API open and logs
 a warning at startup. The Kubernetes base sets `AUTH_MODE=jwt`.
 [docs/access-tokens.md](docs/access-tokens.md) walks through the setup on both sides.
+
+### Remote sources
+
+With `REMOTE_ALLOWED_HOSTS` set, a token's `path` may be an `http(s)` URL. Wavy then
+probes and plays that URL instead of a file on the share: FFmpeg reads it directly for
+HLS modes, and `direct` files are proxied through `/api/sessions/{id}/file` with the
+browser's Range requests passed on.
+
+- Only hosts on the list are fetched (`bucket.s3.eu-west-1.amazonaws.com`,
+  `*.amazonaws.com`, `minio.internal:9000`). https only unless `REMOTE_ALLOW_HTTP=true`.
+  No credentials in the URL, no redirects. A share grant never opens a URL, and a URL
+  grant opens exactly its URL, checked before anything is fetched.
+- FFmpeg gets `-protocol_whitelist https,tls,tcp` (a remote file can't make it open local
+  paths) and `-tls_verify 1` against `REMOTE_CA_FILE` (FFmpeg doesn't verify by default).
+- Wavy reads the size with a one-byte range GET, because presigned URLs aren't valid for
+  HEAD. The URL's query (the signature) is never logged or returned; logs and
+  responses show origin + path.
+- The link must stay valid for the whole session: a seek or a transcode restart opens it
+  again. Presign for at least `SESSION_MAX_AGE_MS`, or as long as a viewing can last.
+
+### Share-root prefixes
+
+`MEDIA_PATH_PREFIXES` lists other spellings of the share root that clients may put in
+front of a path, comma-separated: `\\fileserver\media\,smb://fileserver/media/,/mnt/media/`.
+A matching prefix (ignoring case, longest first) is removed before the path is checked,
+in requests and in token paths. Anything that matches no prefix is checked as is;
+wavy never guesses a missing folder.
 
 ### Metrics
 
@@ -146,6 +176,11 @@ Plus the default process metrics, prefixed `wavy_`.
 | `JWT_CLOCK_TOLERANCE_SEC` | `60` | Allowed clock difference with the main server. |
 | `JWT_MAX_TOKEN_AGE_SEC` | `900` | Tokens issued longer ago than this are refused, whatever `exp` says. |
 | `JWT_JWKS_COOLDOWN_SEC` | `30` | With `JWT_JWKS_URL`: minimum time between two fetches. |
+| `REMOTE_ALLOWED_HOSTS` | | Hosts a token URL may point to: `host`, `host:port` or `*.suffix`, comma-separated. Empty turns remote sources off. |
+| `REMOTE_ALLOW_HTTP` | `false` | Also allow plain `http://` URLs (an in-cluster MinIO, for example). |
+| `REMOTE_TIMEOUT_MS` | `15000` | Timeout for opening a remote file and for each stalled read. |
+| `REMOTE_CA_FILE` | `/etc/ssl/certs/ca-certificates.crt` | CA bundle for https sources. Set it for a private CA. |
+| `MEDIA_PATH_PREFIXES` | | Other spellings of the share root, stripped from the front of paths. |
 | `FFMPEG_PATH`, `FFPROBE_PATH` | `ffmpeg`, `ffprobe` | Binaries. |
 | `LOG_LEVEL` | | `silent` turns logs off. |
 

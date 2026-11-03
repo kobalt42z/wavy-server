@@ -12,6 +12,8 @@ import { posix } from "node:path";
 import type { AuthConfig } from "./config.ts";
 import { ApiError } from "./http/errors.ts";
 import { log } from "./log.ts";
+import { stripRootPrefix, type MediaFile } from "./media-path.ts";
+import { isRemoteUrl, redactUrl } from "./remote.ts";
 
 /**
  * Playback access tokens.
@@ -37,8 +39,12 @@ export interface AuthUser {
 }
 
 export interface Grant {
-  /** Normalized path relative to the media root. Ends in "/" for a folder grant. */
+  /**
+   * Normalized path relative to the media root, ending in "/" for a folder grant;
+   * or, when `remote`, the full http(s) URL to play.
+   */
   path: string;
+  remote?: boolean;
   /** Token id (jti), for the audit log. */
   tokenId: string;
   /** Expiry, seconds since the epoch. */
@@ -53,11 +59,14 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   await next();
 };
 
-/** May this user view this file? Both paths are relative to the media root. */
-export function canViewPath(user: AuthUser | null, relPath: string, realRelPath = relPath): boolean {
-  if (!user?.grant) return false;
+/** May this user view this file? */
+export function canViewPath(user: AuthUser | null, file: Pick<MediaFile, "relPath" | "realRelPath" | "absPath" | "remote">): boolean {
+  const grant = user?.grant;
+  if (!grant) return false;
+  // A URL grant covers exactly that URL; a share grant never covers a URL.
+  if (grant.remote || file.remote) return Boolean(grant.remote && file.remote && grant.path === file.absPath);
   // A symlink inside a granted folder must not lead to a file outside it.
-  return grantCovers(user.grant.path, relPath) && grantCovers(user.grant.path, realRelPath);
+  return grantCovers(grant.path, file.relPath) && grantCovers(grant.path, file.realRelPath);
 }
 
 /**
@@ -79,9 +88,9 @@ export function grantCovers(grantPath: string, relPath: string): boolean {
  * forward slashes, no "." or empty segments. Keeps a trailing "/" (folder grant).
  * Returns null for anything that isn't a clean relative path.
  */
-export function normalizeGrantPath(raw: unknown): string | null {
+export function normalizeGrantPath(raw: unknown, rootPrefixes: string[] = []): string | null {
   if (typeof raw !== "string" || raw.trim() === "" || raw.includes("\0")) return null;
-  const unified = raw.replace(/\\/g, "/");
+  const unified = stripRootPrefix(raw, rootPrefixes).replace(/\\/g, "/");
   if (unified.startsWith("/") || /^[a-zA-Z]:/.test(unified)) return null;
   if (unified.split("/").includes("..")) return null;
   const folder = unified.endsWith("/");
@@ -98,13 +107,13 @@ export interface Auth {
    */
   requireGrant: MiddlewareHandler<AppEnv>;
   /** May the current user see this file? Always true with auth off. */
-  allows(user: AuthUser | null, relPath: string, realRelPath: string): boolean;
+  allows(user: AuthUser | null, file: MediaFile): boolean;
 }
 
 const unauthorized = (reason: string) =>
   new ApiError(401, "unauthorized", reason, { "WWW-Authenticate": 'Bearer realm="wavy"' });
 
-export function createAuth(cfg: AuthConfig): Auth {
+export function createAuth(cfg: AuthConfig, rootPrefixes: string[] = []): Auth {
   if (cfg.mode === "none") {
     return { enabled: false, requireGrant: async (_c, next) => next(), allows: () => true };
   }
@@ -128,12 +137,15 @@ export function createAuth(cfg: AuthConfig): Auth {
       if (err instanceof joseErrors.JWTExpired) throw unauthorized("The access token has expired. Ask for a new one.");
       throw unauthorized("The access token is not valid.");
     }
-    const path = normalizeGrantPath(payload.path);
+    const remote = isRemoteUrl(payload.path);
+    const path = remote ? normalizeUrl(payload.path as string) : normalizeGrantPath(payload.path, rootPrefixes);
     if (!path || typeof payload.sub !== "string" || payload.sub === "" || typeof payload.jti !== "string") {
       log("warn", "token_rejected", { why: "bad_claims", sub: payload.sub, jti: payload.jti });
       throw unauthorized("The access token is not valid.");
     }
-    return { id: payload.sub, grant: { path, tokenId: payload.jti, expiresAt: payload.exp! } };
+    const grant: Grant = { path, tokenId: payload.jti, expiresAt: payload.exp! };
+    if (remote) grant.remote = true;
+    return { id: payload.sub, grant };
   };
 
   return {
@@ -147,6 +159,21 @@ export function createAuth(cfg: AuthConfig): Auth {
     },
     allows: canViewPath,
   };
+}
+
+/** The URL as `new URL()` writes it, so a grant and a request compare equal. */
+function normalizeUrl(raw: string): string | null {
+  try {
+    return new URL(raw.trim()).toString();
+  } catch {
+    return null;
+  }
+}
+
+/** A grant's path, safe for logs (a URL grant loses its query). */
+export function grantLabel(grant: Grant | undefined): string | undefined {
+  if (!grant) return undefined;
+  return grant.remote ? redactUrl(grant.path) : grant.path;
 }
 
 function loadKeys(cfg: AuthConfig): JWTVerifyGetKey {

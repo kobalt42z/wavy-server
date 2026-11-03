@@ -21,7 +21,8 @@ Browser                         Main server                         Wavy
 ```
 
 There are four pieces to set up: the keys, wavy's settings, the token endpoint on
-the main server, and the frontend.
+the main server, and the frontend. Sections 9 and 10 cover files on S3 (an `http(s)`
+link in the token) and paths written with the share's full name.
 
 ## 1. Make the key pair (once)
 
@@ -298,3 +299,94 @@ Common mistakes:
 - Expired right away: the two servers' clocks differ by more than 60 s. Fix NTP.
 - `403` for a file that should be allowed: compare the `grant` and `path` fields of
   `access_denied`. Case and leading folders must match exactly.
+
+## 9. Files on S3 (an http(s) link in the token)
+
+When the file isn't on the share, put a link to it in the token's `path`, for example
+an S3 presigned GET URL. Wavy then plays from that link and doesn't touch the share.
+Nothing else changes for the frontend.
+
+**Wavy:**
+
+```bash
+REMOTE_ALLOWED_HOSTS=my-bucket.s3.eu-west-1.amazonaws.com   # or *.amazonaws.com, minio.internal:9000
+# REMOTE_ALLOW_HTTP=true          only for a plain-http store inside the cluster
+# REMOTE_CA_FILE=/etc/wavy/ca.pem for a store with a private CA
+```
+
+In Kubernetes, add these to `wavy-server-env` in your overlay. The pods also need egress
+to that host (NetworkPolicy, firewall, proxy).
+
+**Main server:**
+
+```ts
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
+const s3 = new S3Client({ region: "eu-west-1" });
+
+// Instead of signWavyToken(user.id, "cases/12/cam3.mp4"):
+const link = await getSignedUrl(s3, new GetObjectCommand({ Bucket: "my-bucket", Key: "cases/12/cam3.mp4" }), {
+  expiresIn: 4 * 60 * 60, // the whole viewing: wavy opens the link again on every seek
+});
+const token = await signWavyToken(user.id, link);
+```
+
+The frontend calls `POST /api/sessions` with the token and an empty body (or
+`{ "path": <the same link> }`). Wavy picks the link up from the token.
+
+**What wavy enforces:**
+
+- Only hosts on `REMOTE_ALLOWED_HOSTS` are fetched, https only by default. A link with
+  `user:password@` is refused, and so is a redirect. This stops the token from being
+  used to make wavy reach internal services (SSRF).
+- A URL grant covers exactly that URL. A share grant never opens a URL, and a URL grant
+  never opens a share file. This is checked before anything is fetched.
+- FFmpeg may only use network protocols (`https,tls,tcp`), so a crafted remote file
+  can't make it read local files. It also verifies TLS certificates (`-tls_verify 1`),
+  which FFmpeg doesn't do by default.
+- Presigned URLs only allow GET, so wavy reads the file size with a one-byte `Range`
+  GET. Browser Range requests for direct files are passed through to the store.
+- The link's query string (the signature) never appears in logs or API responses.
+  They show `https://host/path` only.
+
+**Two things to know:**
+
+1. **The browser can read the link.** A JWT is signed, not encrypted, so anyone holding
+   the token can decode it and fetch the presigned URL directly from S3 until it
+   expires, bypassing wavy and its audit log. If that matters, the next step is an
+   `s3://bucket/key` path in the token. Wavy would then hold read-only S3 credentials
+   and presign the link itself, so the browser never sees a usable link.
+2. **The link must outlive the session.** Wavy opens the link again for every seek and
+   every restart of a transcode. A 15-minute presign would break seeking after 15
+   minutes. Presign it for as long as a viewing can last, up to `SESSION_MAX_AGE_MS`
+   (4 h by default).
+
+## 10. Paths with the share's full name (`MEDIA_PATH_PREFIXES`)
+
+Wavy compares paths relative to the share root (`cases/12/cam3.mp4`). If parts of your
+system store the full name, for example `\\fileserver\media\cases\12\cam3.mp4`,
+`smb://fileserver/media/...` or `/mnt/media/...`, list those roots:
+
+```bash
+MEDIA_PATH_PREFIXES='\\fileserver\media\,smb://fileserver/media/,/mnt/media/'
+```
+
+Wavy removes a matching root from the front of the path, in requests and in tokens
+alike. Letter case is ignored and the longest root wins. Then it checks the path as
+usual, so `..` and paths that leave the share are still refused.
+
+Recommendations:
+
+- **One canonical form, made by the main server.** The main server writes the token,
+  so convert paths there once (relative to the share, forward slashes). The prefix
+  list is a safety net for full paths that slip through.
+- **Never guess.** If a path is missing a folder (`12/cam3.mp4` instead of
+  `cases/12/cam3.mp4`), wavy answers 404 instead of searching for the file. A search
+  could grant the wrong file.
+- **Letter case:** the share ignores case, but the token check compares exactly. A
+  token for `Cases/12/` doesn't cover `cases/12/x.mp4`, so the request is refused
+  rather than allowed. To avoid it, store paths in the case the share reports (as
+  `bun run scan` lists them).
+- **Folder grants end in `/`.** `cases/12/` covers `cases/12/a.mp4` but not
+  `cases/123/a.mp4`.

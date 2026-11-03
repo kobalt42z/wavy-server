@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_CA_FILE, type RemoteConfig } from "./remote.ts";
 
 /** Runtime settings, read from environment variables. See README "Configuration". */
 export interface Config {
@@ -36,7 +37,15 @@ export interface Config {
   rulesPath?: string;
   /** Origins allowed to call the API from a browser ("*" or a comma-separated list). */
   corsOrigins: string[];
+  /**
+   * Other spellings of the share root that clients may put in front of a path
+   * (`\\fileserver\media\`, `smb://fileserver/media/`, `/mnt/media/`). Stripped before
+   * the path is checked, in requests and in token paths alike.
+   */
+  mediaPathPrefixes: string[];
   auth: AuthConfig;
+  /** Playing tokens whose path is an http(s) URL. Off while allowedHosts is empty. */
+  remote: RemoteConfig;
 }
 
 /** Algorithms a token may be signed with. Asymmetric only: wavy holds no signing key. */
@@ -79,6 +88,18 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     throw new Error(`HLS_SEGMENT_TYPE must be "fmp4" or "mpegts" (got "${segmentType}")`);
   }
 
+  const list = (raw: string | undefined) => (raw ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+  const bool = (name: string, def: boolean): boolean => {
+    const raw = env[name];
+    if (raw === undefined || raw === "") return def;
+    if (raw === "true" || raw === "1") return true;
+    if (raw === "false" || raw === "0") return false;
+    throw new Error(`${name} must be true or false (got "${raw}")`);
+  };
+  for (const h of list(env.REMOTE_ALLOWED_HOSTS)) {
+    if (!/^(\*\.)?[a-z0-9.-]+(:\d+)?$/i.test(h) || h === "*.") throw new Error(`REMOTE_ALLOWED_HOSTS: "${h}" is not a host, host:port or *.suffix`);
+  }
+
   const authMode = str("AUTH_MODE", "none");
   if (authMode !== "none" && authMode !== "jwt") throw new Error(`AUTH_MODE must be "none" or "jwt" (got "${authMode}")`);
   const algorithms = str("JWT_ALGORITHMS", "EdDSA").split(",").map((a) => a.trim()).filter(Boolean);
@@ -115,6 +136,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     retryAfterSec: int("RETRY_AFTER_SEC", 5, 1),
     rulesPath: env.PLAYBACK_RULES || undefined,
     corsOrigins: str("CORS_ORIGINS", "*").split(",").map((o) => o.trim()).filter(Boolean),
+    mediaPathPrefixes: list(env.MEDIA_PATH_PREFIXES),
+    remote: {
+      allowedHosts: list(env.REMOTE_ALLOWED_HOSTS),
+      allowHttp: bool("REMOTE_ALLOW_HTTP", false),
+      timeoutMs: int("REMOTE_TIMEOUT_MS", 15_000, 1),
+      caFile: str("REMOTE_CA_FILE", DEFAULT_CA_FILE),
+      customCa: Boolean(env.REMOTE_CA_FILE),
+    },
     auth: {
       mode: authMode,
       jwks,

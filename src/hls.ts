@@ -4,6 +4,8 @@ import type { ProbeResult } from "./probe.ts";
 
 export interface HlsOptions {
   input: string;
+  /** Protocol options for a remote (http) input, placed before -i. */
+  inputProtocolArgs?: string[];
   outDir: string;
   /** Seek start in seconds (FFmpeg -ss before -i). */
   start: number;
@@ -46,7 +48,7 @@ export function buildHlsArgs(decision: Decision, probe: ProbeResult, o: HlsOptio
     "-fflags", "+genpts",
   ];
   if (o.start > 0) args.push("-ss", formatSeconds(o.start));
-  args.push(...probe.inputArgs, "-i", o.input);
+  args.push(...(o.inputProtocolArgs ?? []), ...probe.inputArgs, "-i", o.input);
 
   if (video.action !== "none" && video.index !== undefined) args.push("-map", `0:${video.index}`);
   if (audio.action !== "none" && audio.index !== undefined) args.push("-map", `0:${audio.index}`);

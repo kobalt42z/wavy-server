@@ -7,7 +7,9 @@ import type { Decision, PlaybackMode } from "./decide.ts";
 import { buildHlsArgs, parseProgressSpeed, PLAYLIST_NAME } from "./hls.ts";
 import { ApiError } from "./http/errors.ts";
 import { log } from "./log.ts";
+import type { MediaFile } from "./media-path.ts";
 import type { Metrics } from "./metrics.ts";
+import { remoteInputArgs } from "./remote.ts";
 import type { ProbeResult } from "./probe.ts";
 
 export type EncoderState = "none" | "running" | "done" | "failed";
@@ -21,6 +23,8 @@ export interface Session {
   tokenId: string | null;
   relPath: string;
   absPath: string;
+  /** The remote source, for sessions playing an http(s) URL. */
+  remoteFile?: MediaFile;
   extension: string;
   mode: Exclude<PlaybackMode, "unsupported">;
   decision: Decision;
@@ -44,6 +48,7 @@ export interface CreateSessionInput {
   tokenId?: string | null;
   relPath: string;
   absPath: string;
+  remoteFile?: MediaFile;
   extension: string;
   decision: Decision;
   probe: ProbeResult;
@@ -115,6 +120,7 @@ export class SessionManager {
       tokenId: input.tokenId ?? null,
       relPath: input.relPath,
       absPath: input.absPath,
+      remoteFile: input.remoteFile,
       extension: input.extension,
       mode,
       decision: input.decision,
@@ -231,6 +237,7 @@ export class SessionManager {
     session.generation += 1;
     const args = buildHlsArgs(session.decision, session.probe, {
       input: session.absPath,
+      inputProtocolArgs: session.remoteFile ? remoteInputArgs(this.cfg.remote, session.absPath) : undefined,
       outDir: session.dir,
       start: session.start,
       prefix: `g${session.generation}`,
@@ -256,7 +263,9 @@ export class SessionManager {
       }
       if (proc.signalCode) return; // killed by us
       session.encoder = "failed";
-      session.error = errText.trim().split("\n").slice(-3).join(" | ") || `ffmpeg exited with code ${code}`;
+      const lines = errText.trim().split("\n").slice(-3).join(" | ") || `ffmpeg exited with code ${code}`;
+      // A remote URL's signature (the query) stays out of logs and API responses.
+      session.error = session.absPath === session.relPath ? lines : lines.split(session.absPath).join(session.relPath);
       this.metrics.ffmpegFailures.inc({ mode: session.mode, extension: session.extension });
       log("error", "ffmpeg_failed", {
         sessionId: session.id,
