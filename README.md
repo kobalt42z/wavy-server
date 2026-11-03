@@ -28,18 +28,23 @@ Errors are `{ "error": "<code>", "reason": "<sentence for the user>" }`.
 
 | Endpoint | Purpose | Response |
 | --- | --- | --- |
-| `GET /api/probe?path=` | ffprobe + decision table | `{ path, mode, reason, duration, container, size, video, audio: [{ track, codec, channels, lang }], subtitles, plan }` |
-| `POST /api/sessions` `{ path, start?, audioTrack? }` | Start playback | `201 { sessionId, mode, url, start, duration, reason }`. `url` is the file URL for `direct`, else the HLS playlist. |
+| `GET /api/probe?path=` 🔑 | ffprobe + decision table | `{ path, mode, reason, duration, container, size, video, audio: [{ track, codec, channels, lang }], subtitles, plan }` |
+| `POST /api/sessions` 🔑 `{ path?, start?, audioTrack? }` | Start playback. `path` defaults to the token's file. | `201 { sessionId, mode, url, start, duration, reason }`. `url` is `/api/sessions/{id}/file` for `direct`, else the HLS playlist. |
 | `GET /api/sessions/{id}` | Session state | `{ sessionId, mode, url, path, start, duration, encoder, error }` |
 | `GET /api/sessions/{id}/index.m3u8` | HLS playlist (waits for the first segment) | `application/vnd.apple.mpegurl` |
 | `GET /api/sessions/{id}/{segment}` | HLS segment | `video/mp4` (fMP4) or `video/mp2t` |
+| `GET`/`HEAD /api/sessions/{id}/file` | Original file of a `direct` session, with Range support | `200` / `206` / `416` |
 | `POST /api/sessions/{id}/seek` `{ position }` | Restart FFmpeg at `position` seconds | `{ url, start }` |
 | `DELETE /api/sessions/{id}` | Stop: kill FFmpeg, delete segments (idempotent) | `204` |
 | `POST /api/sessions/{id}/stop` | Same as DELETE, for `navigator.sendBeacon` | `204` |
-| `GET`/`HEAD /api/files/{path}` | Original file with Range support, `direct` files only | `200` / `206` / `416` |
+| `GET`/`HEAD /api/files/{path}` 🔑 | Original file with Range support, `direct` files only (downloads; players use the session URL) | `200` / `206` / `416` |
 | `GET /healthz`, `GET /metrics` | Liveness, Prometheus metrics | |
 
-Status codes: `400` bad input or `invalid_path`, `404` missing file or session,
+🔑 needs an access token when `AUTH_MODE=jwt` (see "Access tokens"). The session
+endpoints don't: the session id is the credential.
+
+Status codes: `400` bad input or `invalid_path`, `401 unauthorized` missing, invalid
+or expired token, `403 forbidden` the token doesn't cover the file, `404` missing file or session,
 `409 not_direct` when `/api/files` is asked for a file that needs conversion,
 `422 unsupported` with the reason to show, `502 ffmpeg_failed`, and `503` with
 `Retry-After` when the pod is at `MAX_TRANSCODES` / `MAX_SESSIONS` (`capacity`) or the
@@ -58,14 +63,45 @@ Behaviour:
 - Paths are normalized; `..`, absolute paths, NUL bytes and symlinks that leave the
   media root are rejected. FFmpeg gets an argument array, never a shell string.
 - Unsupported and failed files are logged (JSON lines on stdout) with their probe
-  result. Session start and end are logged with user, file, mode and time open.
+  result. Session start and end are logged with user, token id, file, mode and time
+  open (the audit trail); rejected tokens (`token_rejected`) and denied paths
+  (`access_denied`) are logged too.
+- HLS sessions end after `SESSION_IDLE_TIMEOUT_MS` without requests. Direct sessions
+  don't idle out (a paused `<video>` sends nothing, and they hold no FFmpeg); they
+  end on stop or at `SESSION_MAX_AGE_MS`.
 
-### Authentication hook
+### Access tokens
 
-Version 1 is open. `src/auth.ts` holds the hooks: `authenticate` (Hono middleware on
-`/api/*`, sets `user`), `canViewPath(user, path)` and `canUseSession(user, ownerId)`.
-Sessions already record their owner, so once `authenticate` sets a user, sessions and
-segments are only reachable by the user who created them.
+The main server decides who may watch what; wavy only checks its answer. When a user
+may watch a file, the main server signs a short-lived JWT with its private key, and the
+browser sends it to wavy as `Authorization: Bearer <token>` (never in a URL):
+
+```json
+header  { "alg": "EdDSA", "kid": "k1" }
+payload { "sub": "user-42", "path": "cases/12/cam3.mp4", "iss": "main", "aud": "wavy",
+          "iat": 1767000000, "exp": 1767000600, "jti": "7d0c…" }
+```
+
+- `path` is relative to the media root. A file grant matches exactly (after both
+  paths are normalized); a folder grant ends in `/` and matches what's inside it
+  (`cases/12/` does not match `cases/123/…`). A symlink inside a granted folder that
+  leads out of it is refused.
+- Checked: signature against the public keys (`JWT_JWKS_FILE`, `JWT_JWKS` or
+  `JWT_JWKS_URL`, picked by `kid`), `alg` in `JWT_ALGORITHMS` (asymmetric only), `iss`,
+  `aud`, `exp` with `JWT_CLOCK_TOLERANCE_SEC` of slack, `iat` no older than
+  `JWT_MAX_TOKEN_AGE_SEC`, and `sub`, `jti`, `path` present.
+- The token is checked once, at `GET /api/probe`, `POST /api/sessions` and
+  `/api/files`. From then on the session URL (`/api/sessions/{id}/…`, 144 random bits)
+  carries the playlist, segments, seeks and Range requests, so hls.js and `<video src>`
+  need no token, and a token that expires mid-video doesn't stop playback.
+- Wavy holds only public keys: it can't mint tokens. A JWKS that contains a private
+  key is refused at startup.
+- `bun scripts/gen-token-keys.ts keys k1` makes an Ed25519 key pair: the private key
+  for the main server, `keys/jwks.json` for wavy.
+
+`AUTH_MODE=none` (the default, for development and tests) leaves the API open and logs
+a warning at startup. The Kubernetes base sets `AUTH_MODE=jwt`.
+[docs/access-tokens.md](docs/access-tokens.md) walks through the setup on both sides.
 
 ### Metrics
 
@@ -103,6 +139,13 @@ Plus the default process metrics, prefixed `wavy_`.
 | `AUDIO_BITRATE` | `160k` | AAC bitrate. |
 | `RETRY_AFTER_SEC` | `5` | `Retry-After` on 503. |
 | `CORS_ORIGINS` | `*` | Allowed browser origins, comma-separated. |
+| `AUTH_MODE` | `none` | `jwt` requires an access token to start playback; `none` is open. |
+| `JWT_JWKS_FILE` / `JWT_JWKS` / `JWT_JWKS_URL` | | The main server's public keys: a JWKS file, inline JWKS JSON, or a URL (cached 10 min, refetched for an unknown `kid`). |
+| `JWT_ALGORITHMS` | `EdDSA` | Accepted `alg` values, comma-separated: `EdDSA`, `Ed25519`, `ES256`, `ES384`, `ES512`, `RS256`, `PS256`. |
+| `JWT_ISSUER`, `JWT_AUDIENCE` | `main`, `wavy` | Required `iss` and `aud`. |
+| `JWT_CLOCK_TOLERANCE_SEC` | `60` | Allowed clock difference with the main server. |
+| `JWT_MAX_TOKEN_AGE_SEC` | `900` | Tokens issued longer ago than this are refused, whatever `exp` says. |
+| `JWT_JWKS_COOLDOWN_SEC` | `30` | With `JWT_JWKS_URL`: minimum time between two fetches. |
 | `FFMPEG_PATH`, `FFPROBE_PATH` | `ffmpeg`, `ffprobe` | Binaries. |
 | `LOG_LEVEL` | | `silent` turns logs off. |
 

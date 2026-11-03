@@ -1,13 +1,13 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { join } from "node:path";
-import { authenticate, canUseSession, canViewPath, type AppEnv } from "./auth.ts";
+import { authenticate, canUseSession, createAuth, type AppEnv } from "./auth.ts";
 import type { Config } from "./config.ts";
 import { serveFile } from "./files.ts";
 import { PLAYLIST_NAME, SEGMENT_NAME, segmentContentType } from "./hls.ts";
 import { ApiError, badRequest, notFound } from "./http/errors.ts";
 import { log } from "./log.ts";
-import { encodeMediaPath, resolveMediaPath, type MediaFile } from "./media-path.ts";
+import { resolveMediaPath, type MediaFile } from "./media-path.ts";
 import type { Metrics } from "./metrics.ts";
 import { PlaybackAnalyzer, unsupportedError } from "./playback.ts";
 import type { PlaybackRules } from "./rules.ts";
@@ -21,9 +21,12 @@ export interface AppDeps {
 }
 
 const FILES_PREFIX = "/api/files/";
+/** Path segment of a direct session's file. Can't clash with SEGMENT_NAME or the playlist. */
+const SESSION_FILE_NAME = "file";
 
 export function createApp({ config, rules, metrics, sessions }: AppDeps) {
   const analyzer = new PlaybackAnalyzer(rules, metrics, config.ffprobePath);
+  const auth = createAuth(config.auth);
   const app = new Hono<AppEnv>();
 
   app.onError((err, c) => {
@@ -52,14 +55,28 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
       maxAge: 600,
     }),
   );
-  // Auth hook: see src/auth.ts. Open for now.
+  // Access tokens: see src/auth.ts. Only the endpoints that take a path check one;
+  // session URLs are their own credential.
   app.use("/api/*", authenticate);
+  app.use("/api/probe", auth.requireGrant);
+  app.on("POST", "/api/sessions", auth.requireGrant);
+  app.use(`${FILES_PREFIX}*`, auth.requireGrant);
 
-  /** Resolves a client path and checks the viewer may see it. */
+  /** Resolves a client path and checks the viewer's token covers it. */
   const openFile = async (c: Context<AppEnv>, path: string | undefined): Promise<MediaFile> => {
     const file = await resolveMediaPath(config.mediaRoot, path);
-    if (!canViewPath(c.get("user"), file.relPath)) throw new ApiError(403, "forbidden", "You may not view this file.");
+    if (!auth.allows(c.get("user"), file.relPath, file.realRelPath)) {
+      log("warn", "access_denied", { user: c.get("user")?.id, grant: c.get("user")?.grant?.path, path: file.relPath });
+      throw new ApiError(403, "forbidden", "Your access token does not cover this file.");
+    }
     return file;
+  };
+
+  /** The path in the body, or the token's file when the body has none. */
+  const requestedPath = (c: Context<AppEnv>, body: Record<string, unknown>): string | undefined => {
+    if (typeof body.path === "string") return body.path;
+    const grant = c.get("user")?.grant;
+    return grant && !grant.path.endsWith("/") ? grant.path : undefined;
   };
 
   const sessionFor = (c: Context<AppEnv>): Session => {
@@ -70,8 +87,9 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
   };
 
   const playlistUrl = (s: Session) => `/api/sessions/${s.id}/${PLAYLIST_NAME}?v=${s.generation}`;
-  const fileUrl = (relPath: string) => `${FILES_PREFIX}${encodeMediaPath(relPath)}`;
-  const sessionUrl = (s: Session) => (s.mode === "direct" ? fileUrl(s.relPath) : playlistUrl(s));
+  // Direct files are served under the session too, so <video src> needs no token.
+  const fileUrl = (s: Session) => `/api/sessions/${s.id}/${SESSION_FILE_NAME}`;
+  const sessionUrl = (s: Session) => (s.mode === "direct" ? fileUrl(s) : playlistUrl(s));
 
   app.get("/api/probe", async (c) => {
     const file = await openFile(c, c.req.query("path"));
@@ -84,7 +102,7 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
     const start = optionalNumber(body.start, "start", 0);
     const audioTrack = optionalNumber(body.audioTrack, "audioTrack", 0);
     if (audioTrack !== undefined && !Number.isInteger(audioTrack)) throw badRequest("audioTrack must be an integer.");
-    const file = await openFile(c, typeof body.path === "string" ? body.path : undefined);
+    const file = await openFile(c, requestedPath(c, body));
 
     const analysis = await analyzer.analyze(file);
     if (analysis.decision.mode === "unsupported" || !analysis.probe) {
@@ -97,6 +115,7 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
     const user = c.get("user");
     const session = await sessions.create({
       ownerId: user?.id ?? null,
+      tokenId: user?.grant?.tokenId ?? null,
       relPath: file.relPath,
       absPath: file.absPath,
       extension: analyzer.label(analysis.extension),
@@ -141,6 +160,15 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
       "Content-Type": "application/vnd.apple.mpegurl",
       "Cache-Control": "no-store",
     });
+  });
+
+  // The original file of a direct session, with Range support.
+  app.on(["GET", "HEAD"], `/api/sessions/:id/${SESSION_FILE_NAME}`, async (c) => {
+    const s = sessionFor(c);
+    if (s.mode !== "direct") throw notFound("HLS sessions serve a playlist, not the file.");
+    sessions.touch(s);
+    // Resolved again so a file that was moved or replaced is never served stale.
+    return serveFile(await resolveMediaPath(config.mediaRoot, s.relPath), c.req.raw);
   });
 
   app.get("/api/sessions/:id/:segment", async (c) => {
@@ -193,6 +221,10 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
           ? analysis.decision.reason
           : `This file needs ${analysis.decision.mode}; start a session with POST /api/sessions.`,
       );
+    }
+    const user = c.get("user");
+    if (user && c.req.method === "GET") {
+      log("info", "file_served", { user: user.id, tokenId: user.grant?.tokenId, path: file.relPath, range: c.req.header("range") ?? null });
     }
     return serveFile(file, c.req.raw);
   };

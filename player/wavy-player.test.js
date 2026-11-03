@@ -148,6 +148,37 @@ describe("WavyPlayer.load", () => {
     expect(media.plays).toBe(1);
   });
 
+  test("getToken: one token per load, sent to probe and session start only", async () => {
+    const asked = [];
+    const { media, player, api } = setup(
+      {
+        ...sessionRoutes(
+          { mode: "direct", duration: 5, container: "mp4" },
+          { sessionId: "s1", mode: "direct", url: "/api/sessions/s1/file" },
+        ),
+      },
+      { getToken: async (path) => (asked.push(path), "tok-1") },
+    );
+    await player.load("cases/12/a.mp4");
+    expect(asked).toEqual(["cases/12/a.mp4"]);
+    expect(api.calls[0].init.headers).toMatchObject({ authorization: "Bearer tok-1" });
+    expect(api.calls[1].init.headers).toMatchObject({ authorization: "Bearer tok-1", "content-type": "application/json" });
+    expect(media.src).toBe("/api/sessions/s1/file");
+    await player.stop();
+    const del = api.calls.find((c) => c.method === "DELETE");
+    expect(del.init.headers).toBeUndefined();
+  });
+
+  test("getToken failing rejects load() with an unauthorized error and starts nothing", async () => {
+    const { player, api } = setup(sessionRoutes({ mode: "direct" }, { sessionId: "s1", mode: "direct", url: "/x" }), {
+      getToken: async () => {
+        throw new Error("403 from main");
+      },
+    });
+    await expect(player.load("a.mp4")).rejects.toMatchObject({ code: "unauthorized" });
+    expect(api.calls).toHaveLength(0);
+  });
+
   test("direct mode with a start time jumps there once metadata loads", async () => {
     const { media, player } = setup(
       sessionRoutes({ mode: "direct", duration: 60 }, { sessionId: "s1", mode: "direct", url: "/api/files/x.mp4" }),

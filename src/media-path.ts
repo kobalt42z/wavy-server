@@ -7,6 +7,8 @@ export interface MediaFile {
   relPath: string;
   /** Real absolute path on disk (symlinks resolved, guaranteed inside the root). */
   absPath: string;
+  /** relPath of the real file (symlinks resolved); equals relPath when no symlink is involved. */
+  realRelPath: string;
   size: number;
   mtimeMs: number;
 }
@@ -49,6 +51,7 @@ export async function resolveMediaPath(root: string, input: string | undefined |
   return {
     relPath: relative(rootReal, candidate).split(sep).join("/"),
     absPath: real,
+    realRelPath: relative(rootReal, real).split(sep).join("/"),
     size: st.size,
     mtimeMs: st.mtimeMs,
   };

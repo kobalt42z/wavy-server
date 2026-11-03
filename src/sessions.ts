@@ -17,6 +17,8 @@ export interface Session {
   id: string;
   /** User who created the session (null while auth is off). */
   ownerId: string | null;
+  /** Id (jti) of the access token that started the session, for the audit log. */
+  tokenId: string | null;
   relPath: string;
   absPath: string;
   extension: string;
@@ -39,6 +41,7 @@ export interface Session {
 
 export interface CreateSessionInput {
   ownerId: string | null;
+  tokenId?: string | null;
   relPath: string;
   absPath: string;
   extension: string;
@@ -109,6 +112,7 @@ export class SessionManager {
     const session: Session = {
       id,
       ownerId: input.ownerId,
+      tokenId: input.tokenId ?? null,
       relPath: input.relPath,
       absPath: input.absPath,
       extension: input.extension,
@@ -138,6 +142,7 @@ export class SessionManager {
     log("info", "session_started", {
       sessionId: id,
       user: input.ownerId,
+      tokenId: session.tokenId,
       path: input.relPath,
       mode,
       start: session.start,
@@ -178,12 +183,16 @@ export class SessionManager {
     });
   }
 
-  /** Stops sessions nobody has requested a segment from lately, or that ran too long. */
+  /**
+   * Stops HLS sessions nobody has requested a segment from lately, and any session
+   * that ran too long. Direct sessions hold no FFmpeg or disk, and a paused <video>
+   * sends no requests, so they only end on stop or at the age limit.
+   */
   async reap(): Promise<void> {
     const t = this.now();
     for (const s of this.list()) {
       if (t - s.createdAt > this.cfg.maxSessionAgeMs) await this.stop(s, "expired");
-      else if (t - s.lastAccess > this.cfg.idleTimeoutMs) await this.stop(s, "idle");
+      else if (isHls(s) && t - s.lastAccess > this.cfg.idleTimeoutMs) await this.stop(s, "idle");
     }
   }
 

@@ -94,6 +94,10 @@ export class WavyPlayer extends EventTarget {
    *   Hls?: any,                    hls.js constructor (required for every mode but direct)
    *   apiBase?: string,             e.g. "https://media.example.com"; default same origin
    *   fetch?: typeof fetch,
+   *   getToken?: (path: string) => string | Promise<string>,
+   *                                 access token for this file, from the main server.
+   *                                 Sent as "Authorization: Bearer" to probe and session
+   *                                 start only; playback itself uses the session URL.
    *   hlsConfig?: object,           extra hls.js config, merged over the defaults
    *   stopOnPageHide?: boolean,     end the session when the tab closes (default true)
    * }} [options]
@@ -104,6 +108,7 @@ export class WavyPlayer extends EventTarget {
     this.Hls = options.Hls;
     this.apiBase = (options.apiBase ?? "").replace(/\/+$/, "");
     this._fetch = options.fetch ?? ((...args) => globalThis.fetch(...args));
+    this._getToken = options.getToken;
     this.hlsConfig = options.hlsConfig ?? {};
 
     this.state = "idle";
@@ -151,8 +156,8 @@ export class WavyPlayer extends EventTarget {
   }
 
   /** GET /api/probe. Resolves with the probe JSON, rejects with PlaybackError. */
-  probe(path) {
-    return this._request("GET", `/api/probe?path=${encodeURIComponent(path)}`);
+  async probe(path, headers) {
+    return this._request("GET", `/api/probe?path=${encodeURIComponent(path)}`, undefined, headers ?? (await this._authHeaders(path)));
   }
 
   /**
@@ -172,7 +177,10 @@ export class WavyPlayer extends EventTarget {
     this.path = path;
     try {
       this._setState("probing");
-      const probe = await this.probe(path);
+      // One token covers the probe and the session start.
+      const auth = await this._authHeaders(path);
+      if (token !== this._loadToken) return;
+      const probe = await this.probe(path, auth);
       if (token !== this._loadToken) return;
       this.probeResult = probe;
       if (probe.mode === "unsupported") {
@@ -183,7 +191,7 @@ export class WavyPlayer extends EventTarget {
       const body = { path };
       if (start > 0) body.start = start;
       if (opts.audioTrack !== undefined && opts.audioTrack !== null) body.audioTrack = opts.audioTrack;
-      const session = await this._request("POST", "/api/sessions", body);
+      const session = await this._request("POST", "/api/sessions", body, auth);
       if (token !== this._loadToken) {
         // A newer load() started while we waited: drop this session.
         this._deleteSession(session.sessionId);
@@ -431,12 +439,25 @@ export class WavyPlayer extends EventTarget {
     }
   }
 
-  async _request(method, path, body) {
+  async _authHeaders(path) {
+    if (!this._getToken) return undefined;
+    let t;
+    try {
+      t = await this._getToken(path);
+    } catch (err) {
+      if (err instanceof PlaybackError) throw err;
+      throw new PlaybackError("unauthorized", "You don't have access to this file.", { cause: err });
+    }
+    return t ? { authorization: `Bearer ${t}` } : undefined;
+  }
+
+  async _request(method, path, body, extraHeaders) {
     let res;
+    const headers = { ...(body ? { "content-type": "application/json" } : {}), ...(extraHeaders ?? {}) };
     try {
       res = await this._fetch(this._resolve(path), {
         method,
-        headers: body ? { "content-type": "application/json" } : undefined,
+        headers: Object.keys(headers).length ? headers : undefined,
         body: body ? JSON.stringify(body) : undefined,
       });
     } catch (err) {

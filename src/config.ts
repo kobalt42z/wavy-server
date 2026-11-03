@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -35,6 +36,32 @@ export interface Config {
   rulesPath?: string;
   /** Origins allowed to call the API from a browser ("*" or a comma-separated list). */
   corsOrigins: string[];
+  auth: AuthConfig;
+}
+
+/** Algorithms a token may be signed with. Asymmetric only: wavy holds no signing key. */
+export const TOKEN_ALGORITHMS = ["EdDSA", "Ed25519", "ES256", "ES384", "ES512", "RS256", "PS256"] as const;
+
+/**
+ * Playback grants signed by the main server. See README "Access tokens".
+ * mode "none" leaves the API open (development); "jwt" requires a token to start playback.
+ */
+export interface AuthConfig {
+  mode: "none" | "jwt";
+  /** URL of the main server's public keys (JWKS). Fetched and cached. */
+  jwksUrl?: string;
+  /** Public keys as a JWKS JSON document ({"keys":[...]}), from JWT_JWKS or JWT_JWKS_FILE. */
+  jwks?: string;
+  /** Accepted "alg" values; anything else is rejected before the signature is checked. */
+  algorithms: string[];
+  issuer: string;
+  audience: string;
+  /** Allowed clock difference with the main server when checking exp/nbf/iat. */
+  clockToleranceSec: number;
+  /** Tokens older than this (by iat) are rejected, whatever their exp says. */
+  maxTokenAgeSec: number;
+  /** With jwksUrl: the minimum time between two fetches (an unknown kid triggers one). */
+  jwksCooldownSec: number;
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -51,6 +78,22 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (segmentType !== "fmp4" && segmentType !== "mpegts") {
     throw new Error(`HLS_SEGMENT_TYPE must be "fmp4" or "mpegts" (got "${segmentType}")`);
   }
+
+  const authMode = str("AUTH_MODE", "none");
+  if (authMode !== "none" && authMode !== "jwt") throw new Error(`AUTH_MODE must be "none" or "jwt" (got "${authMode}")`);
+  const algorithms = str("JWT_ALGORITHMS", "EdDSA").split(",").map((a) => a.trim()).filter(Boolean);
+  for (const a of algorithms) {
+    if (!(TOKEN_ALGORITHMS as readonly string[]).includes(a)) {
+      throw new Error(`JWT_ALGORITHMS: "${a}" is not allowed (use ${TOKEN_ALGORITHMS.join(", ")})`);
+    }
+  }
+  let jwks = env.JWT_JWKS || undefined;
+  if (!jwks && env.JWT_JWKS_FILE) jwks = readFileSync(env.JWT_JWKS_FILE, "utf8");
+  const jwksUrl = env.JWT_JWKS_URL || undefined;
+  if (authMode === "jwt" && !jwks && !jwksUrl) {
+    throw new Error("AUTH_MODE=jwt needs the main server's public keys: set JWT_JWKS_FILE, JWT_JWKS or JWT_JWKS_URL");
+  }
+  if (jwksUrl && !/^https?:\/\//.test(jwksUrl)) throw new Error(`JWT_JWKS_URL must be an http(s) URL (got "${jwksUrl}")`);
 
   return {
     port: int("PORT", 8080, 0),
@@ -72,5 +115,16 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     retryAfterSec: int("RETRY_AFTER_SEC", 5, 1),
     rulesPath: env.PLAYBACK_RULES || undefined,
     corsOrigins: str("CORS_ORIGINS", "*").split(",").map((o) => o.trim()).filter(Boolean),
+    auth: {
+      mode: authMode,
+      jwks,
+      jwksUrl,
+      algorithms,
+      issuer: str("JWT_ISSUER", "main"),
+      audience: str("JWT_AUDIENCE", "wavy"),
+      clockToleranceSec: int("JWT_CLOCK_TOLERANCE_SEC", 60, 0),
+      maxTokenAgeSec: int("JWT_MAX_TOKEN_AGE_SEC", 900, 1),
+      jwksCooldownSec: int("JWT_JWKS_COOLDOWN_SEC", 30, 0),
+    },
   };
 }

@@ -33,7 +33,20 @@ To talk to a service on another origin without the dev server, add
 import Hls from "hls.js"; // npm i hls.js
 import { WavyPlayer, describeError } from "./wavy-player.js";
 
-const player = new WavyPlayer(document.querySelector("video"), { Hls });
+const player = new WavyPlayer(document.querySelector("video"), {
+  Hls,
+  // With AUTH_MODE=jwt: ask your main server for a playback token for this file.
+  getToken: async (path) => {
+    const res = await fetch("/media/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ path }),
+    });
+    if (!res.ok) throw new Error(`token: HTTP ${res.status}`);
+    return (await res.json()).token;
+  },
+});
 
 try {
   await player.load(path, { start: 0 });
