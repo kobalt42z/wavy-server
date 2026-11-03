@@ -40,6 +40,8 @@ export class PlaybackAnalyzer {
     private readonly metrics: Metrics,
     private readonly ffprobePath: string,
     private readonly cacheSize = 1000,
+    /** ffprobe/FFmpeg input options for remote (http) files. */
+    private readonly remoteInputArgs: (url: string) => string[] = () => [],
   ) {}
 
   /** Extension as a metrics label: known extensions as-is, anything else as "other". */
@@ -50,7 +52,8 @@ export class PlaybackAnalyzer {
   }
 
   async analyze(file: MediaFile): Promise<Analysis> {
-    const key = `${file.absPath}\0${file.size}\0${file.mtimeMs}`;
+    // Remote URLs carry a fresh signature per link, so they are keyed without it.
+    const key = `${file.remote ? file.relPath : file.absPath}\0${file.size}\0${file.mtimeMs}\0${file.etag ?? ""}`;
     const hit = this.cache.get(key);
     if (hit) {
       this.cache.delete(key);
@@ -65,11 +68,15 @@ export class PlaybackAnalyzer {
       analysis = { extension, decision: unsupported(extReason) };
     } else {
       const stopTimer = this.metrics.probeDuration.startTimer();
-      const outcome = await probeFile(file.absPath, this.rules, { ffprobePath: this.ffprobePath });
+      const outcome = await probeFile(file.absPath, this.rules, {
+        ffprobePath: this.ffprobePath,
+        extension,
+        baseInputArgs: file.remote ? this.remoteInputArgs(file.absPath) : undefined,
+      });
       stopTimer();
       analysis = outcome.ok
         ? { extension, probe: outcome.probe, decision: decide(outcome.probe, extension, this.rules) }
-        : { extension, decision: unsupported(`FFmpeg cannot read this file (${outcome.error}).`) };
+        : { extension, decision: unsupported(`FFmpeg cannot read this file (${redact(outcome.error, file)}).`) };
     }
 
     this.metrics.probeResults.inc({ mode: analysis.decision.mode, extension: this.label(extension) });
@@ -118,6 +125,11 @@ export class PlaybackAnalyzer {
       plan: { video: a.decision.video.action, audio: a.decision.audio.action },
     };
   }
+}
+
+/** Keeps a remote URL's signature out of messages and logs. */
+function redact(text: string, file: MediaFile): string {
+  return file.remote ? text.split(file.absPath).join(file.relPath) : text;
 }
 
 export function unsupportedError(reason: string): ApiError {

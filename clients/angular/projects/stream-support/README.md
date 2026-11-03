@@ -26,7 +26,17 @@ export class Player {
   message = signal('');
 
   async open(path: string) {
-    const res = await fetch('/api/sessions', { method: 'POST', body: JSON.stringify({ path }) });
+    // 1. Ask the main server for a playback token (it checks the user may see the file).
+    const { token } = await (await fetch('/media/token', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }),
+    })).json();
+    // 2. Start the session with it. Playback then uses the session URL, no token needed.
+    const res = await fetch('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ path }),
+    });
     const body = await res.json();
     // 422 { error: "unsupported", reason } becomes an unsupported stream.
     this.session.set(res.ok ? body : { mode: 'unsupported', reason: body.reason });

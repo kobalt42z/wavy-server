@@ -38,6 +38,8 @@ deploy/k8s/
    kubectl create namespace wavy
    kubectl -n wavy create secret generic wavy-smb-credentials \
      --from-literal=username='svc-wavy-ro' --from-literal=password='...'
+   # public keys of the main server's token signing key (scripts/gen-token-keys.ts):
+   kubectl -n wavy create secret generic wavy-token-keys --from-file=jwks.json=keys/jwks.json
    # optional, for TLS on the ingress:
    kubectl -n wavy create secret tls wavy-server-tls --cert=tls.crt --key=tls.key
    ```
@@ -57,6 +59,7 @@ deploy/k8s/
 | Readiness and liveness on `/healthz` | `base/deployment.yaml` |
 | Non-root | uid 1000, read-only root filesystem, all capabilities dropped |
 | Rules in config, not code | `wavy-playback-rules` ConfigMap at `/etc/wavy/playback-rules.json` |
+| Playback only with the main server's grant | `AUTH_MODE=jwt` in `wavy-server-env` (checked by `check-invariants.ts`), keys from Secret `wavy-token-keys` |
 
 ## Contract with the service
 
@@ -65,7 +68,9 @@ The manifests expect the service image to:
 - listen on `PORT` (8080) and serve `/healthz` and `/metrics` there;
 - read `MEDIA_ROOT`, `SESSIONS_DIR`, `PLAYBACK_RULES`, `MAX_TRANSCODES`,
   `MAX_SESSIONS`, `SESSION_IDLE_TIMEOUT_MS`, `PLAYLIST_WAIT_MS`, `HLS_SEGMENT_TYPE`,
-  `CORS_ORIGINS` and `LOG_LEVEL` from the environment (`base/kustomization.yaml`);
+  `CORS_ORIGINS`, `LOG_LEVEL` and the `AUTH_MODE` / `JWT_*` token settings from the
+  environment (`base/kustomization.yaml`), and the public keys from
+  `/etc/wavy-token-keys/jwks.json` (Secret `wavy-token-keys`);
 - export the gauge `wavy_active_transcodes` (full transcodes running on the pod);
 - run as uid 1000 and write only under `/tmp`.
 

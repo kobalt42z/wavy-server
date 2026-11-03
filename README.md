@@ -28,18 +28,23 @@ Errors are `{ "error": "<code>", "reason": "<sentence for the user>" }`.
 
 | Endpoint | Purpose | Response |
 | --- | --- | --- |
-| `GET /api/probe?path=` | ffprobe + decision table | `{ path, mode, reason, duration, container, size, video, audio: [{ track, codec, channels, lang }], subtitles, plan }` |
-| `POST /api/sessions` `{ path, start?, audioTrack? }` | Start playback | `201 { sessionId, mode, url, start, duration, reason }`. `url` is the file URL for `direct`, else the HLS playlist. |
+| `GET /api/probe?path=` 🔑 | ffprobe + decision table | `{ path, mode, reason, duration, container, size, video, audio: [{ track, codec, channels, lang }], subtitles, plan }` |
+| `POST /api/sessions` 🔑 `{ path?, start?, audioTrack? }` | Start playback. `path` defaults to the token's file. | `201 { sessionId, mode, url, start, duration, reason }`. `url` is `/api/sessions/{id}/file` for `direct`, else the HLS playlist. |
 | `GET /api/sessions/{id}` | Session state | `{ sessionId, mode, url, path, start, duration, encoder, error }` |
 | `GET /api/sessions/{id}/index.m3u8` | HLS playlist (waits for the first segment) | `application/vnd.apple.mpegurl` |
 | `GET /api/sessions/{id}/{segment}` | HLS segment | `video/mp4` (fMP4) or `video/mp2t` |
+| `GET`/`HEAD /api/sessions/{id}/file` | Original file of a `direct` session, with Range support | `200` / `206` / `416` |
 | `POST /api/sessions/{id}/seek` `{ position }` | Restart FFmpeg at `position` seconds | `{ url, start }` |
 | `DELETE /api/sessions/{id}` | Stop: kill FFmpeg, delete segments (idempotent) | `204` |
 | `POST /api/sessions/{id}/stop` | Same as DELETE, for `navigator.sendBeacon` | `204` |
-| `GET`/`HEAD /api/files/{path}` | Original file with Range support, `direct` files only | `200` / `206` / `416` |
+| `GET`/`HEAD /api/files/{path}` 🔑 | Original file with Range support, `direct` files only (downloads; players use the session URL) | `200` / `206` / `416` |
 | `GET /healthz`, `GET /metrics` | Liveness, Prometheus metrics | |
 
-Status codes: `400` bad input or `invalid_path`, `404` missing file or session,
+🔑 needs an access token when `AUTH_MODE=jwt` (see "Access tokens"). The session
+endpoints don't: the session id is the credential.
+
+Status codes: `400` bad input or `invalid_path`, `401 unauthorized` missing, invalid
+or expired token, `403 forbidden` the token doesn't cover the file, `404` missing file or session,
 `409 not_direct` when `/api/files` is asked for a file that needs conversion,
 `422 unsupported` with the reason to show, `502 ffmpeg_failed`, and `503` with
 `Retry-After` when the pod is at `MAX_TRANSCODES` / `MAX_SESSIONS` (`capacity`) or the
@@ -58,14 +63,75 @@ Behaviour:
 - Paths are normalized; `..`, absolute paths, NUL bytes and symlinks that leave the
   media root are rejected. FFmpeg gets an argument array, never a shell string.
 - Unsupported and failed files are logged (JSON lines on stdout) with their probe
-  result. Session start and end are logged with user, file, mode and time open.
+  result. Session start and end are logged with user, token id, file, mode and time
+  open (the audit trail); rejected tokens (`token_rejected`) and denied paths
+  (`access_denied`) are logged too.
+- HLS sessions end after `SESSION_IDLE_TIMEOUT_MS` without requests. Direct sessions
+  don't idle out (a paused `<video>` sends nothing, and they hold no FFmpeg); they
+  end on stop or at `SESSION_MAX_AGE_MS`.
 
-### Authentication hook
+### Access tokens
 
-Version 1 is open. `src/auth.ts` holds the hooks: `authenticate` (Hono middleware on
-`/api/*`, sets `user`), `canViewPath(user, path)` and `canUseSession(user, ownerId)`.
-Sessions already record their owner, so once `authenticate` sets a user, sessions and
-segments are only reachable by the user who created them.
+The main server decides who may watch what; wavy only checks its answer. When a user
+may watch a file, the main server signs a short-lived JWT with its private key, and the
+browser sends it to wavy as `Authorization: Bearer <token>` (never in a URL):
+
+```json
+header  { "alg": "EdDSA", "kid": "k1" }
+payload { "sub": "user-42", "path": "cases/12/cam3.mp4", "iss": "main", "aud": "wavy",
+          "iat": 1767000000, "exp": 1767000600, "jti": "7d0c…" }
+```
+
+- `path` is relative to the media root. A file grant matches exactly (after both
+  paths are normalized); a folder grant ends in `/` and matches what's inside it
+  (`cases/12/` does not match `cases/123/…`). A symlink inside a granted folder that
+  leads out of it is refused.
+- Checked: signature against the public keys (`JWT_JWKS_FILE`, `JWT_JWKS` or
+  `JWT_JWKS_URL`, picked by `kid`), `alg` in `JWT_ALGORITHMS` (asymmetric only), `iss`,
+  `aud`, `exp` with `JWT_CLOCK_TOLERANCE_SEC` of slack, `iat` no older than
+  `JWT_MAX_TOKEN_AGE_SEC`, and `sub`, `jti`, `path` present.
+- The token is checked once, at `GET /api/probe`, `POST /api/sessions` and
+  `/api/files`. From then on the session URL (`/api/sessions/{id}/…`, 144 random bits)
+  carries the playlist, segments, seeks and Range requests, so hls.js and `<video src>`
+  need no token, and a token that expires mid-video doesn't stop playback.
+- Wavy holds only public keys: it can't mint tokens. A JWKS that contains a private
+  key is refused at startup.
+- `bun scripts/gen-token-keys.ts keys k1` makes an Ed25519 key pair: the private key
+  for the main server, `keys/jwks.json` for wavy.
+
+- A token whose `path` is an `http(s)` URL (an S3 presigned link, for example) plays
+  from that URL instead of the share; see "Remote sources".
+
+`AUTH_MODE=none` (the default, for development and tests) leaves the API open and logs
+a warning at startup. The Kubernetes base sets `AUTH_MODE=jwt`.
+[docs/access-tokens.md](docs/access-tokens.md) walks through the setup on both sides.
+
+### Remote sources
+
+With `REMOTE_ALLOWED_HOSTS` set, a token's `path` may be an `http(s)` URL. Wavy then
+probes and plays that URL instead of a file on the share: FFmpeg reads it directly for
+HLS modes, and `direct` files are proxied through `/api/sessions/{id}/file` with the
+browser's Range requests passed on.
+
+- Only hosts on the list are fetched (`bucket.s3.eu-west-1.amazonaws.com`,
+  `*.amazonaws.com`, `minio.internal:9000`). https only unless `REMOTE_ALLOW_HTTP=true`.
+  No credentials in the URL, no redirects. A share grant never opens a URL, and a URL
+  grant opens exactly its URL, checked before anything is fetched.
+- FFmpeg gets `-protocol_whitelist https,tls,tcp` (a remote file can't make it open local
+  paths) and `-tls_verify 1` against `REMOTE_CA_FILE` (FFmpeg doesn't verify by default).
+- Wavy reads the size with a one-byte range GET, because presigned URLs aren't valid for
+  HEAD. The URL's query (the signature) is never logged or returned; logs and
+  responses show origin + path.
+- The link must stay valid for the whole session: a seek or a transcode restart opens it
+  again. Presign for at least `SESSION_MAX_AGE_MS`, or as long as a viewing can last.
+
+### Share-root prefixes
+
+`MEDIA_PATH_PREFIXES` lists other spellings of the share root that clients may put in
+front of a path, comma-separated: `\\fileserver\media\,smb://fileserver/media/,/mnt/media/`.
+A matching prefix (ignoring case, longest first) is removed before the path is checked,
+in requests and in token paths. Anything that matches no prefix is checked as is;
+wavy never guesses a missing folder.
 
 ### Metrics
 
@@ -103,6 +169,18 @@ Plus the default process metrics, prefixed `wavy_`.
 | `AUDIO_BITRATE` | `160k` | AAC bitrate. |
 | `RETRY_AFTER_SEC` | `5` | `Retry-After` on 503. |
 | `CORS_ORIGINS` | `*` | Allowed browser origins, comma-separated. |
+| `AUTH_MODE` | `none` | `jwt` requires an access token to start playback; `none` is open. |
+| `JWT_JWKS_FILE` / `JWT_JWKS` / `JWT_JWKS_URL` | | The main server's public keys: a JWKS file, inline JWKS JSON, or a URL (cached 10 min, refetched for an unknown `kid`). |
+| `JWT_ALGORITHMS` | `EdDSA` | Accepted `alg` values, comma-separated: `EdDSA`, `Ed25519`, `ES256`, `ES384`, `ES512`, `RS256`, `PS256`. |
+| `JWT_ISSUER`, `JWT_AUDIENCE` | `main`, `wavy` | Required `iss` and `aud`. |
+| `JWT_CLOCK_TOLERANCE_SEC` | `60` | Allowed clock difference with the main server. |
+| `JWT_MAX_TOKEN_AGE_SEC` | `900` | Tokens issued longer ago than this are refused, whatever `exp` says. |
+| `JWT_JWKS_COOLDOWN_SEC` | `30` | With `JWT_JWKS_URL`: minimum time between two fetches. |
+| `REMOTE_ALLOWED_HOSTS` | | Hosts a token URL may point to: `host`, `host:port` or `*.suffix`, comma-separated. Empty turns remote sources off. |
+| `REMOTE_ALLOW_HTTP` | `false` | Also allow plain `http://` URLs (an in-cluster MinIO, for example). |
+| `REMOTE_TIMEOUT_MS` | `15000` | Timeout for opening a remote file and for each stalled read. |
+| `REMOTE_CA_FILE` | `/etc/ssl/certs/ca-certificates.crt` | CA bundle for https sources. Set it for a private CA. |
+| `MEDIA_PATH_PREFIXES` | | Other spellings of the share root, stripped from the front of paths. |
 | `FFMPEG_PATH`, `FFPROBE_PATH` | `ffmpeg`, `ffprobe` | Binaries. |
 | `LOG_LEVEL` | | `silent` turns logs off. |
 
@@ -125,11 +203,11 @@ Prebuilt images (linux/amd64 and linux/arm64) are published to GHCR by
 `.github/workflows/release.yml`:
 
 ```bash
-docker pull ghcr.io/kobalt42z/wavy-server:0.1.0   # a release (also :0.1, :latest)
+docker pull ghcr.io/kobalt42z/wavy-server:0.2.0   # a release (also :0.2, :latest)
 docker pull ghcr.io/kobalt42z/wavy-server:dev     # tip of dev (also :main, :sha-<short>)
 ```
 
-To cut a release, push a `v*` tag, for example `git tag v0.1.0 && git push origin v0.1.0`.
+To cut a release, push a `v*` tag, for example `git tag v0.2.0 && git push origin v0.2.0`.
 
 ## Playback modes
 

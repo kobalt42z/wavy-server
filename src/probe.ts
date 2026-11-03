@@ -43,6 +43,10 @@ export type ProbeOutcome = { ok: true; probe: ProbeResult } | { ok: false; error
 export interface ProbeOptions {
   ffprobePath?: string;
   timeoutMs?: number;
+  /** Extension to use for the rules, when `path` doesn't end in one (a URL with a query). */
+  extension?: string;
+  /** Input options put before every attempt, not kept in `inputArgs` (remote protocol options). */
+  baseInputArgs?: string[];
 }
 
 /**
@@ -50,13 +54,14 @@ export interface ProbeOptions {
  * retries with each fallback format if auto-detection fails.
  */
 export async function probeFile(path: string, rules: PlaybackRules, opts: ProbeOptions = {}): Promise<ProbeOutcome> {
-  const ext = extensionOf(path);
+  const ext = opts.extension ?? extensionOf(path);
   const override = rules.inputOverrides[ext]?.args;
+  const base = opts.baseInputArgs ?? [];
   const attempts: string[][] = override ? [override] : [[], ...rules.probeFallbackFormats.map((f) => ["-f", f])];
 
   let lastError = "ffprobe could not read the file";
   for (const inputArgs of attempts) {
-    const res = await runFfprobe(path, inputArgs, opts);
+    const res = await runFfprobe(path, [...base, ...inputArgs], opts);
     if (!res.ok) {
       lastError = res.error;
       continue;
