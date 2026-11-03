@@ -156,8 +156,23 @@ docker build -t wavy-server .
 docker run -p 8080:8080 -v /path/to/media:/media:ro --read-only --tmpfs /tmp wavy-server
 ```
 
-The image is `oven/bun` slim with Debian's FFmpeg, runs as uid 1000 under `tini`, and
-works with a read-only root filesystem as long as `/tmp` is writable.
+The image is distroless (`gcr.io/distroless/base-nossl-debian13`: glibc only, no shell
+or package manager) with the Bun binary, a static FFmpeg 8.0 build
+(`mwader/static-ffmpeg`) and a static `tini`. It runs as uid 1000 under `tini` and works
+with a read-only root filesystem as long as `/tmp` is writable. Base images are pinned
+by digest and kept current by Dependabot; CI fails the build on any HIGH or CRITICAL
+finding from Trivy. With no shell in the image, debug with `docker exec <c> bun -e '…'`
+or an ephemeral debug container (`kubectl debug`).
+
+Prebuilt images (linux/amd64 and linux/arm64) are published to GHCR by
+`.github/workflows/release.yml`:
+
+```bash
+docker pull ghcr.io/kobalt42z/wavy-server:0.1.0   # a release (also :0.1, :latest)
+docker pull ghcr.io/kobalt42z/wavy-server:dev     # tip of dev (also :main, :sha-<short>)
+```
+
+To cut a release, push a `v*` tag, for example `git tag v0.1.0 && git push origin v0.1.0`.
 
 ## Playback modes
 
