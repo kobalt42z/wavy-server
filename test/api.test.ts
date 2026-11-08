@@ -206,3 +206,26 @@ test("CORS preflight is answered", async () => {
   expect(res.status).toBe(204);
   expect(res.headers.get("access-control-allow-origin")).toBe("*");
 });
+
+test("CORS with listed origins allows credentials (sticky-session cookie), with * it doesn't", async () => {
+  expect(
+    (
+      await fetch(`${srv.base}/api/sessions`, {
+        method: "OPTIONS",
+        headers: { Origin: "http://app.example", "Access-Control-Request-Method": "POST" },
+      })
+    ).headers.get("access-control-allow-credentials"),
+  ).toBeNull();
+
+  const listed = await startServer(await samplesDir(), { corsOrigins: ["http://app.example"] });
+  try {
+    const res = await fetch(`${listed.base}/api/sessions`, {
+      method: "OPTIONS",
+      headers: { Origin: "http://app.example", "Access-Control-Request-Method": "POST" },
+    });
+    expect(res.headers.get("access-control-allow-origin")).toBe("http://app.example");
+    expect(res.headers.get("access-control-allow-credentials")).toBe("true");
+  } finally {
+    listed.close();
+  }
+});

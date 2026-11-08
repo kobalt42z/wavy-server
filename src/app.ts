@@ -52,6 +52,9 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
     "/api/*",
     cors({
       origin: config.corsOrigins.includes("*") ? "*" : config.corsOrigins,
+      // With a list of origins, browsers may send cookies (the load balancer's
+      // sticky-session cookie). Never with "*": any site could then use them.
+      credentials: !config.corsOrigins.includes("*"),
       allowMethods: ["GET", "HEAD", "POST", "DELETE", "OPTIONS"],
       allowHeaders: ["Content-Type", "Range", "Authorization"],
       exposeHeaders: ["Content-Range", "Content-Length", "Accept-Ranges", "Retry-After"],

@@ -48,6 +48,7 @@ class FakeHls {
   template: `<video
     [streamSupport]="stream()"
     [hlsConfig]="{ maxBufferLength: 10 }"
+    [streamCredentials]="credentials()"
     #player="streamSupport"
     (streamError)="errors.push($event)"
     (streamUnsupported)="unsupported.push($event)"
@@ -56,6 +57,7 @@ class FakeHls {
 })
 class Host {
   stream = signal<StreamInput>(null);
+  credentials = signal(false);
   errors: StreamError[] = [];
   unsupported: string[] = [];
   ready: StreamEngine[] = [];
@@ -115,6 +117,17 @@ describe('StreamSupportDirective', () => {
     expect(hls.source).toBe('/api/sessions/s1/index.m3u8');
     expect(hls.config).toEqual({ maxBufferLength: 10 });
     expect(directive.engine()).toBe('hls.js');
+  });
+
+  it('sends cookies (sticky session) with streamCredentials', async () => {
+    host.credentials.set(true);
+    await play({ mode: 'transcode', url: 'https://media.example/api/sessions/s1/index.m3u8' });
+    const config = FakeHls.instances[0].config as { maxBufferLength: number; xhrSetup: (xhr: XMLHttpRequest) => void };
+    expect(config.maxBufferLength).toBe(10);
+    const xhr = {} as XMLHttpRequest;
+    config.xhrSetup(xhr);
+    expect(xhr.withCredentials).toBe(true);
+    expect(video.crossOrigin).toBe('use-credentials');
   });
 
   it('uses native HLS when the browser supports it', async () => {

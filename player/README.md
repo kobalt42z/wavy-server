@@ -84,6 +84,19 @@ What it does, following the dev spec's "Frontend player" section:
    (sendBeacon can only POST), with a keepalive `DELETE` as fallback. The server's
    60-second idle timeout is the backup.
 
+6. If the session is lost mid-playback (the pod restarted, or a request reached a
+   pod that doesn't hold the session and got a 404), the player starts a new session
+   at the current position and keeps playing. It fires a `resume` event
+   (`{ position, error }`) each time. A seek that hits a lost session does the same at
+   the seek target. If the new session can't start yet (a 503, or the dying pod still
+   gets the request for a moment), it tries again with a backoff for about 30 s. After
+   `maxResumes` (3) losses within a minute it gives up and fires `error`.
+   `autoResume: false` turns this off. Decode errors are never resumed.
+7. `withCredentials: true` sends cookies to a service on another origin, so the load
+   balancer's sticky-session cookie comes back (fetch `credentials: "include"`, hls.js
+   `withCredentials`, `crossorigin="use-credentials"`). The service's `CORS_ORIGINS`
+   must list the page's origin. Same-origin requests send cookies anyway.
+
 Errors are `PlaybackError`s with `code` (`unsupported`, `busy`, `network`,
 `stream`, …), `reason`, `status` and `retryAfter` (from a `503`).
 `describeError()` turns any of them into one sentence for the user.

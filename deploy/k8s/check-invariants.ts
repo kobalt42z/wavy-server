@@ -76,6 +76,14 @@ for (const ing of find("Ingress")) {
     fail(`Ingress ${ing.metadata.name}: cookie affinity is missing`);
   }
 }
+for (const proxy of find("HTTPProxy")) {
+  for (const route of proxy.spec?.routes ?? []) {
+    if (route.loadBalancerPolicy?.strategy !== "Cookie") {
+      fail(`HTTPProxy ${proxy.metadata.name}: route without loadBalancerPolicy.strategy Cookie`);
+    }
+  }
+}
+if (find("Ingress").length + find("HTTPProxy").length === 0) fail("no Ingress or HTTPProxy: nothing routes browsers to their session's pod");
 
 // Every namespaced object lands in the same namespace.
 const clusterScoped = new Set(["Namespace", "PersistentVolume"]);
