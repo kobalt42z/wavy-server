@@ -91,6 +91,7 @@ player.addEventListener("session", (event) => {
 
 // Fatal errors after playback started (for example hls.js gave up on the stream).
 player.addEventListener("error", (event) => showError(event.detail));
+player.addEventListener("resume", () => showOverlay("Reconnecting…"));
 
 async function open(path, start) {
   if (!path) return;
