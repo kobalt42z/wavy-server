@@ -10,14 +10,17 @@ deploy/k8s/
   components/hpa/               HPA on wavy_active_transcodes (via prometheus-adapter)
   components/keda/              KEDA ScaledObject on the same metric (alternative to hpa)
   components/prometheus-operator/  ServiceMonitor for /metrics
-  overlays/hpa, overlays/keda   Example environments: copy one per cluster
+  components/contour/           HTTPProxy with cookie stickiness, replacing the Ingress
+  overlays/hpa, overlays/keda   Example environments (ingress-nginx): copy one per cluster
+  overlays/contour              Example environment for a Contour cluster
   validate.sh                   Schema + rule checks (runs in CI)
 ```
 
 ## Prerequisites on the cluster
 
 - [SMB CSI driver](https://github.com/kubernetes-csi/csi-driver-smb) (`smb.csi.k8s.io`).
-- [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) for cookie affinity.
+- [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) for cookie affinity, or
+  [Contour](https://projectcontour.io) with `components/contour` (see `overlays/contour`).
 - Prometheus. With the Prometheus Operator the overlays add a ServiceMonitor;
   otherwise drop that component and rely on the `prometheus.io/*` pod annotations.
 - One autoscaler backend: [prometheus-adapter](https://github.com/kubernetes-sigs/prometheus-adapter)
@@ -55,7 +58,7 @@ deploy/k8s/
 | Temp segments in `/tmp/sessions` (`emptyDir`) | `scratch` volume on `/tmp`, local disk with a 20 Gi cap |
 | CPU requests = limits, ~600 MB per transcode + 200 MB | 4 CPU / 3 Gi per pod, sized for `MAX_TRANSCODES=4` |
 | Autoscale on active transcodes, not CPU | `components/hpa` or `components/keda`, target 3 per pod |
-| Sticky sessions | Ingress cookie `WAVY_AFFINITY`; Service `ClientIP` for in-cluster callers |
+| Sticky sessions | Ingress cookie `WAVY_AFFINITY` (or the HTTPProxy's `Cookie` strategy); Service `ClientIP` for in-cluster callers |
 | Readiness and liveness on `/healthz` | `base/deployment.yaml` |
 | Non-root | uid 1000, read-only root filesystem, all capabilities dropped |
 | Rules in config, not code | `wavy-playback-rules` ConfigMap at `/etc/wavy/playback-rules.json` |
@@ -89,11 +92,20 @@ entry using `behavior: replace`.
   ingress sets the `WAVY_AFFINITY` cookie on the first response and routes the
   browser back to that pod. `affinity-mode: persistent` keeps existing browsers in
   place when new pods start, so new pods take new viewers.
-- When the web app is on another origin, the player must send credentials so the
-  cookie comes back (`xhrSetup: xhr => { xhr.withCredentials = true }` in hls.js),
-  and the service must reply with `Access-Control-Allow-Credentials: true`. Set
-  `CORS_ORIGINS` to the web app's origin in your overlay: browsers reject
-  credentialed requests when the allowed origin is `*`.
+- With Contour (`components/contour`), Envoy sets the `X-Contour-Session-Affinity`
+  cookie instead and routes on it. Envoy reaches the pods directly, so the Service's
+  `ClientIP` affinity doesn't apply. The HTTPProxy raises the response timeout to
+  120 s (Contour's default of 15 s is the same as the first playlist's wait) and
+  retries 503 on another pod.
+- On the same origin as the web app (wavy under a path of its host), the cookie comes
+  back on its own. On another origin, set `CORS_ORIGINS` to the web app's origin in
+  your overlay: with a list of origins the service answers
+  `Access-Control-Allow-Credentials: true` (never with `*`, which browsers reject for
+  credentialed requests anyway). Then turn on credentials in the player:
+  `withCredentials: true` in `WavyPlayer`, `[streamCredentials]="true"` on the
+  Angular directive.
+- If a session is lost anyway (its pod restarted, or a request reached another pod),
+  `WavyPlayer` starts a new one at the same position.
 - A pod at its transcode cap returns `503`. The ingress retries that request on
   another pod (up to 3 tries) and moves the cookie there.
 - Scale-down is slow (one pod per 5 minutes after 10 quiet minutes) because a

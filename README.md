@@ -168,7 +168,7 @@ Plus the default process metrics, prefixed `wavy_`.
 | `X264_PRESET`, `X264_CRF` | `veryfast`, `23` | Full transcode quality. |
 | `AUDIO_BITRATE` | `160k` | AAC bitrate. |
 | `RETRY_AFTER_SEC` | `5` | `Retry-After` on 503. |
-| `CORS_ORIGINS` | `*` | Allowed browser origins, comma-separated. |
+| `CORS_ORIGINS` | `*` | Allowed browser origins, comma-separated. A list (not `*`) also allows credentials, so a load balancer's sticky-session cookie works cross-origin. |
 | `AUTH_MODE` | `none` | `jwt` requires an access token to start playback; `none` is open. |
 | `JWT_JWKS_FILE` / `JWT_JWKS` / `JWT_JWKS_URL` | | The main server's public keys: a JWKS file, inline JWKS JSON, or a URL (cached 10 min, refetched for an unknown `kid`). |
 | `JWT_ALGORITHMS` | `EdDSA` | Accepted `alg` values, comma-separated: `EdDSA`, `Ed25519`, `ES256`, `ES384`, `ES512`, `RS256`, `PS256`. |

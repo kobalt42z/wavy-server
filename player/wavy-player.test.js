@@ -552,6 +552,30 @@ describe("WavyPlayer auto-resume", () => {
     expect(hls.at(-1).source).toBe("/api/sessions/s2/index.m3u8");
   });
 
+  test("a resume that hits a busy or vanishing pod is tried again", async () => {
+    const routes = resumeRoutes(PROBE_TRANSCODE, "transcode");
+    let probes = 0;
+    const probe = routes["GET /api/probe"];
+    // The second probe (the first resume) lands on a pod that is going away.
+    routes["GET /api/probe"] = (...args) => (++probes === 2 ? [503, { error: "capacity", reason: "busy" }, { "Retry-After": "1" }] : probe(...args));
+    const { player, hls, media } = setup(routes);
+    const errors = [];
+    player.addEventListener("error", (e) => errors.push(e.detail));
+    await player.load("x.avi");
+    media.currentTime = 50;
+    hls[0].emit("hlsError", { fatal: true, type: "networkError", response: { code: 404 } });
+    await tick();
+    await tick();
+    expect(player.state).toBe("error");
+    await new Promise((r) => setTimeout(r, 1100));
+    await tick();
+    await tick();
+    expect(errors).toHaveLength(0);
+    expect(player.state).toBe("playing");
+    expect(player.offset).toBe(50);
+    expect(probes).toBe(3);
+  });
+
   test("gives up after maxResumes losses in a minute", async () => {
     const { player, hls } = setup(resumeRoutes(PROBE_TRANSCODE, "transcode"), { maxResumes: 2 });
     const errors = [];
@@ -605,5 +629,36 @@ describe("WavyPlayer auto-resume", () => {
     await tick();
     expect(api.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions")).toHaveLength(1);
     expect(player.sessionId).toBe("s1");
+  });
+});
+
+describe("WavyPlayer withCredentials", () => {
+  test("off by default: no credentials on API calls, no xhrSetup", async () => {
+    const { player, api, hls } = setup(
+      sessionRoutes(PROBE_TRANSCODE, { sessionId: "s1", mode: "transcode", url: "/api/sessions/s1/index.m3u8" }),
+    );
+    await player.load("x.mov");
+    expect(api.calls.every((c) => c.init.credentials === undefined)).toBe(true);
+    expect(hls[0].config.xhrSetup).toBeUndefined();
+  });
+
+  test("sends cookies on API calls, hls.js requests and the direct file", async () => {
+    const { player, api, hls } = setup(
+      sessionRoutes(PROBE_TRANSCODE, { sessionId: "s1", mode: "transcode", url: "/api/sessions/s1/index.m3u8" }),
+      { withCredentials: true, apiBase: "https://media.example.com" },
+    );
+    await player.load("x.mov");
+    await player.stop();
+    expect(api.calls.map((c) => c.init.credentials)).toEqual(["include", "include", "include"]);
+    const xhr = {};
+    hls[0].config.xhrSetup(xhr);
+    expect(xhr.withCredentials).toBe(true);
+
+    const direct = setup(
+      sessionRoutes({ ...PROBE_TRANSCODE, mode: "direct" }, { sessionId: "s1", mode: "direct", url: "/api/sessions/s1/file" }),
+      { withCredentials: true },
+    );
+    await direct.player.load("a.mp4");
+    expect(direct.media.crossOrigin).toBe("use-credentials");
   });
 });

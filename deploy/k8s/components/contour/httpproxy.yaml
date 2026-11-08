@@ -1,0 +1,41 @@
+# A playback session (its FFmpeg process and HLS segments) lives on one pod, so every
+# request from a browser must reach the pod that created it. Contour's Cookie strategy
+# has Envoy set the X-Contour-Session-Affinity cookie on the first response and route
+# on it after that. Envoy talks to the pods directly, so the Service's ClientIP
+# affinity does not apply here.
+#
+# Same origin (wavy under a path of the web app's host): cookies come back on their
+# own. Another origin: set CORS_ORIGINS to the web app's origin (the service then
+# allows credentials) and turn on withCredentials in the player.
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  name: wavy-server
+spec:
+  virtualhost:
+    fqdn: wavy.example.local # overlays set the real host
+    tls:
+      secretName: wavy-server-tls
+  routes:
+    - conditions:
+        - prefix: /
+      services:
+        - name: wavy-server
+          port: 80
+      loadBalancerPolicy:
+        strategy: Cookie
+      timeoutPolicy:
+        # A playlist request waits up to PLAYLIST_WAIT_MS (15 s) for FFmpeg's first
+        # segment, and segments can be slow after a seek. Contour's default is 15 s.
+        response: 120s
+        idle: 5m
+      retryPolicy:
+        # A pod at its transcode cap answers 503 before creating anything, and a
+        # connection that never opened (a pod that just went away, before its endpoint
+        # is removed) sent nothing, so both are safe to retry on another pod.
+        count: 3
+        retryOn:
+          - retriable-status-codes
+          - connect-failure
+        retriableStatusCodes:
+          - 503

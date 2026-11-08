@@ -41,21 +41,22 @@ jobs:
       - uses: helm/kind-action@v1
         with:
           cluster_name: wavy
-      - name: Install CRDs (KEDA, Prometheus Operator ServiceMonitor)
+      - name: Install CRDs (KEDA, Prometheus Operator ServiceMonitor, Contour HTTPProxy)
         run: |
           kubectl apply --server-side -f https://github.com/kedacore/keda/releases/download/v2.17.2/keda-2.17.2-crds.yaml
           kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.85.0/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
+          kubectl apply --server-side -f https://raw.githubusercontent.com/projectcontour/contour/release-1.30/examples/contour/01-crds.yaml
           # A just-created CRD can have no status yet, which makes `kubectl wait` fail
           # at once instead of waiting, so retry until both are established.
           for i in $(seq 1 30); do
-            kubectl wait --for condition=established --timeout=10s crd/scaledobjects.keda.sh crd/servicemonitors.monitoring.coreos.com && exit 0
+            kubectl wait --for condition=established --timeout=10s crd/scaledobjects.keda.sh crd/servicemonitors.monitoring.coreos.com crd/httpproxies.projectcontour.io && exit 0
             sleep 2
           done
           exit 1
       - name: Server-side dry run
         run: |
           kubectl create namespace wavy
-          for dir in overlays/hpa overlays/keda; do
+          for dir in overlays/hpa overlays/keda overlays/contour; do
             echo "• $dir"
             kubectl kustomize "deploy/k8s/$dir" | kubectl apply --dry-run=server -f -
           done

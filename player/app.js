@@ -23,8 +23,15 @@ const timeCurrent = $("time-current");
 const timeTotal = $("time-total");
 
 // Optional ?api=https://host to talk to a service on another origin (needs CORS there).
+// With a cross-origin api, the sticky-session cookie is sent (the service must list
+// this page's origin in CORS_ORIGINS). ?credentials=0 turns that off.
 const params = new URLSearchParams(location.search);
-const player = new WavyPlayer(video, { Hls, apiBase: params.get("api") ?? "" });
+const apiBase = params.get("api") ?? "";
+const player = new WavyPlayer(video, {
+  Hls,
+  apiBase,
+  withCredentials: apiBase !== "" && params.get("credentials") !== "0",
+});
 let dragging = false;
 
 form.addEventListener("submit", (event) => {

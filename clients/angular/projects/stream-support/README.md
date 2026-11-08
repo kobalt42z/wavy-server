@@ -50,6 +50,7 @@ export class Player {
 | --- | --- | --- |
 | `streamSupport` | `PlaybackStream \| string \| null` | The session response `{ sessionId, mode, url, start, duration, reason }` (only `mode` is required), or a bare URL. URLs ending in `.m3u8` are played as HLS. |
 | `hlsConfig` | `Partial<HlsConfig>` | Extra hls.js settings. |
+| `streamCredentials` | `boolean` (default `false`) | Send cookies with media requests (hls.js `withCredentials`, `crossorigin="use-credentials"`), so a load balancer's sticky-session cookie reaches a playback service on another origin. The service's `CORS_ORIGINS` must list your app's origin. Not needed on the same origin. Also pass `credentials: 'include'` on your own `fetch('/api/sessions')`. |
 
 A new object with the same `url`, `mode`, `start`, `duration` and `reason` does not reload the player.
 

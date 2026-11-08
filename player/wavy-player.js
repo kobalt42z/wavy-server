@@ -107,6 +107,10 @@ export class WavyPlayer extends EventTarget {
    *   autoResume?: boolean,         when the session is lost, start a new one at the same
    *                                 position (default true)
    *   maxResumes?: number,          resumes allowed per minute before giving up (default 3)
+   *   withCredentials?: boolean,    send cookies to a service on another origin, so the load
+   *                                 balancer's sticky-session cookie comes back (default
+   *                                 false; same-origin requests send cookies anyway). The
+   *                                 service must list the page's origin in CORS_ORIGINS.
    * }} [options]
    */
   constructor(media, options = {}) {
@@ -119,6 +123,7 @@ export class WavyPlayer extends EventTarget {
     this.hlsConfig = options.hlsConfig ?? {};
     this.autoResume = options.autoResume ?? true;
     this.maxResumes = options.maxResumes ?? 3;
+    this.withCredentials = options.withCredentials ?? false;
 
     this.state = "idle";
     this.path = null;
@@ -193,6 +198,8 @@ export class WavyPlayer extends EventTarget {
 
     this.path = path;
     this._audioTrack = opts.audioTrack;
+    // Report the target position while the new session starts (a resume or a start offset).
+    this.offset = start;
     try {
       this._setState("probing");
       // One token covers the probe and the session start.
@@ -320,6 +327,7 @@ export class WavyPlayer extends EventTarget {
   _attachDirect(url, start) {
     this._destroyHls();
     this.media.addEventListener?.("error", this._onMediaError);
+    if (this.withCredentials) this.media.crossOrigin = "use-credentials";
     this.media.src = this._resolve(url);
     if (start > 0) {
       const jump = () => {
@@ -365,6 +373,14 @@ export class WavyPlayer extends EventTarget {
           },
         },
       },
+      // Playlist and segment requests carry the sticky-session cookie cross-origin.
+      ...(this.withCredentials
+        ? {
+            xhrSetup: (xhr) => {
+              xhr.withCredentials = true;
+            },
+          }
+        : {}),
       ...this.hlsConfig,
     });
 
@@ -424,7 +440,21 @@ export class WavyPlayer extends EventTarget {
     const path = this.path;
     const start = Math.max(0, Number(position) || 0);
     this._emit("resume", { position: start, error });
-    this._load(path, { start, audioTrack: this._audioTrack }).catch((err) => this._emit("error", toPlaybackError(err)));
+    const token = this._loadToken + 1; // the token the _load below takes
+    this._load(path, { start, audioTrack: this._audioTrack }).catch((err) => {
+      const error = toPlaybackError(err);
+      // A pod that just went away can still get the next request for a moment (the
+      // load balancer hasn't noticed yet), and a busy pod answers 503: try again shortly.
+      const transient = error.code === "network" || error.code === "busy" || error.status >= 500;
+      if (transient && token === this._loadToken) {
+        const delay = Math.max(1, error.retryAfter ?? 2) * 1000;
+        setTimeout(() => {
+          if (token === this._loadToken && !this._resume(start, error)) this._emit("error", error);
+        }, delay);
+        return;
+      }
+      this._emit("error", error);
+    });
     return true;
   }
 
@@ -468,7 +498,7 @@ export class WavyPlayer extends EventTarget {
   async _deleteSession(id) {
     if (!id) return;
     try {
-      await this._fetch(this._resolve(`/api/sessions/${encodeURIComponent(id)}`), { method: "DELETE" });
+      await this._fetch(this._resolve(`/api/sessions/${encodeURIComponent(id)}`), { method: "DELETE", ...this._credentials() });
     } catch {
       // The server also ends sessions after 60 s without segment requests.
     }
@@ -491,6 +521,7 @@ export class WavyPlayer extends EventTarget {
       this._fetch(this._resolve(`/api/sessions/${encodeURIComponent(id)}`), {
         method: "DELETE",
         keepalive: true,
+        ...this._credentials(),
       }).catch(() => {});
     } catch {
       // ignore
@@ -517,6 +548,7 @@ export class WavyPlayer extends EventTarget {
         method,
         headers: Object.keys(headers).length ? headers : undefined,
         body: body ? JSON.stringify(body) : undefined,
+        ...this._credentials(),
       });
     } catch (err) {
       throw new PlaybackError("network", "Could not reach the playback service.", { cause: err });
@@ -548,6 +580,10 @@ export class WavyPlayer extends EventTarget {
       throw new PlaybackError("bad-response", "The playback service sent an unreadable response.", { status: res.status });
     }
     return data;
+  }
+
+  _credentials() {
+    return this.withCredentials ? { credentials: "include" } : {};
   }
 
   _resolve(url) {
