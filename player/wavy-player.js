@@ -82,6 +82,8 @@ const MANIFEST_RETRIES = 20;
 const MANIFEST_RETRY_MS = 500;
 /** Auto-resume allows `maxResumes` restarts within this window. */
 const RESUME_WINDOW_MS = 60_000;
+/** Retries of one resume whose new session couldn't start (busy or vanishing pod). */
+const RESUME_RETRIES = 5;
 
 /**
  * Events (all CustomEvent, read event.detail):
@@ -431,25 +433,28 @@ export class WavyPlayer extends EventTarget {
    * Starts a new session at `position` after the current one was lost. Returns
    * false when auto-resume is off or was used too often in the last minute.
    */
-  _resume(position, error) {
+  _resume(position, error, attempt = 0) {
     if (!this.autoResume || !this.path) return false;
-    const now = Date.now();
-    this._resumes = this._resumes.filter((t) => now - t < RESUME_WINDOW_MS);
-    if (this._resumes.length >= this.maxResumes) return false;
-    this._resumes.push(now);
+    if (attempt === 0) {
+      const now = Date.now();
+      this._resumes = this._resumes.filter((t) => now - t < RESUME_WINDOW_MS);
+      if (this._resumes.length >= this.maxResumes) return false;
+      this._resumes.push(now);
+      this._emit("resume", { position: Math.max(0, Number(position) || 0), error });
+    }
     const path = this.path;
     const start = Math.max(0, Number(position) || 0);
-    this._emit("resume", { position: start, error });
     const token = this._loadToken + 1; // the token the _load below takes
     this._load(path, { start, audioTrack: this._audioTrack }).catch((err) => {
       const error = toPlaybackError(err);
-      // A pod that just went away can still get the next request for a moment (the
-      // load balancer hasn't noticed yet), and a busy pod answers 503: try again shortly.
+      // A pod that just went away keeps getting its browsers' requests until the load
+      // balancer drops it (a few seconds), and a busy pod answers 503: try again, backing
+      // off (2, 4, 8, 8, 8 s: about 30 s in all). These retries don't count as resumes.
       const transient = error.code === "network" || error.code === "busy" || error.status >= 500;
-      if (transient && token === this._loadToken) {
-        const delay = Math.max(1, error.retryAfter ?? 2) * 1000;
+      if (transient && token === this._loadToken && attempt < RESUME_RETRIES) {
+        const delay = Math.max(1, error.retryAfter ?? Math.min(8, 2 ** (attempt + 1))) * 1000;
         setTimeout(() => {
-          if (token === this._loadToken && !this._resume(start, error)) this._emit("error", error);
+          if (token === this._loadToken) this._resume(start, error, attempt + 1);
         }, delay);
         return;
       }
