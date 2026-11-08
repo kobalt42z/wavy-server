@@ -474,6 +474,9 @@ describe("dev server", () => {
     expect(page.headers.get("content-type")).toContain("text/html");
     expect(await page.text()).toContain("Wavy test player");
     expect((await handle(new Request("http://localhost/wavy-player.js"))).status).toBe(200);
+    const hls = await handle(new Request("http://localhost/hls.mjs"));
+    expect(hls.status).toBe(200);
+    expect(hls.headers.get("content-type")).toContain("javascript");
     expect((await handle(new Request("http://localhost/serve.js"))).status).toBe(404);
     expect((await handle(new Request("http://localhost/../package.json"))).status).toBe(404);
   });

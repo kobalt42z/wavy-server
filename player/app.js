@@ -1,6 +1,6 @@
 // Wiring for the test page. The reusable part is wavy-player.js; this file is
 // only the page around it (form, custom seek bar, info panel, error message).
-import Hls from "https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.mjs";
+import Hls from "./hls.mjs"; // served by serve.js from node_modules/hls.js
 import { WavyPlayer, describeError, formatTime, MODE_LABELS } from "./wavy-player.js";
 
 const $ = (id) => document.getElementById(id);
