@@ -18,7 +18,7 @@ RUN bun install --frozen-lockfile --production \
  && mkdir -p /rootfs/tmp/sessions /rootfs/media
 
 # Statically linked FFmpeg/ffprobe (libx264 + native AAC, HLS muxer), multi-arch.
-FROM mwader/static-ffmpeg:8.0@sha256:415a41fa3167b890b9703d20bd0f00bf1e9dab8a4b6c27fef1445b2bf5f1ab4a AS ffmpeg
+FROM mwader/static-ffmpeg:9.0@sha256:b90574a4e2ae62b763c39c384526689e7eb435da6398f4fb3f6c3f1c6a14ce33 AS ffmpeg
 
 # Static tini, checksum-verified per architecture.
 FROM scratch AS tini-amd64
