@@ -26,7 +26,17 @@ export class Player {
   message = signal('');
 
   async open(path: string) {
-    const res = await fetch('/api/sessions', { method: 'POST', body: JSON.stringify({ path }) });
+    // 1. Ask the main server for a playback token (it checks the user may see the file).
+    const { token } = await (await fetch('/media/token', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }),
+    })).json();
+    // 2. Start the session with it. Playback then uses the session URL, no token needed.
+    const res = await fetch('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ path }),
+    });
     const body = await res.json();
     // 422 { error: "unsupported", reason } becomes an unsupported stream.
     this.session.set(res.ok ? body : { mode: 'unsupported', reason: body.reason });
@@ -40,6 +50,7 @@ export class Player {
 | --- | --- | --- |
 | `streamSupport` | `PlaybackStream \| string \| null` | The session response `{ sessionId, mode, url, start, duration, reason }` (only `mode` is required), or a bare URL. URLs ending in `.m3u8` are played as HLS. |
 | `hlsConfig` | `Partial<HlsConfig>` | Extra hls.js settings. |
+| `streamCredentials` | `boolean` (default `false`) | Send cookies with media requests (hls.js `withCredentials`, `crossorigin="use-credentials"`), so a load balancer's sticky-session cookie reaches a playback service on another origin. The service's `CORS_ORIGINS` must list your app's origin. Not needed on the same origin. Also pass `credentials: 'include'` on your own `fetch('/api/sessions')`. |
 
 A new object with the same `url`, `mode`, `start`, `duration` and `reason` does not reload the player.
 

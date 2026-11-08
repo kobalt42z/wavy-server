@@ -7,7 +7,9 @@ import type { Decision, PlaybackMode } from "./decide.ts";
 import { buildHlsArgs, parseProgressSpeed, PLAYLIST_NAME } from "./hls.ts";
 import { ApiError } from "./http/errors.ts";
 import { log } from "./log.ts";
+import type { MediaFile } from "./media-path.ts";
 import type { Metrics } from "./metrics.ts";
+import { remoteInputArgs } from "./remote.ts";
 import type { ProbeResult } from "./probe.ts";
 
 export type EncoderState = "none" | "running" | "done" | "failed";
@@ -17,8 +19,12 @@ export interface Session {
   id: string;
   /** User who created the session (null while auth is off). */
   ownerId: string | null;
+  /** Id (jti) of the access token that started the session, for the audit log. */
+  tokenId: string | null;
   relPath: string;
   absPath: string;
+  /** The remote source, for sessions playing an http(s) URL. */
+  remoteFile?: MediaFile;
   extension: string;
   mode: Exclude<PlaybackMode, "unsupported">;
   decision: Decision;
@@ -39,8 +45,10 @@ export interface Session {
 
 export interface CreateSessionInput {
   ownerId: string | null;
+  tokenId?: string | null;
   relPath: string;
   absPath: string;
+  remoteFile?: MediaFile;
   extension: string;
   decision: Decision;
   probe: ProbeResult;
@@ -109,8 +117,10 @@ export class SessionManager {
     const session: Session = {
       id,
       ownerId: input.ownerId,
+      tokenId: input.tokenId ?? null,
       relPath: input.relPath,
       absPath: input.absPath,
+      remoteFile: input.remoteFile,
       extension: input.extension,
       mode,
       decision: input.decision,
@@ -138,6 +148,7 @@ export class SessionManager {
     log("info", "session_started", {
       sessionId: id,
       user: input.ownerId,
+      tokenId: session.tokenId,
       path: input.relPath,
       mode,
       start: session.start,
@@ -178,12 +189,16 @@ export class SessionManager {
     });
   }
 
-  /** Stops sessions nobody has requested a segment from lately, or that ran too long. */
+  /**
+   * Stops HLS sessions nobody has requested a segment from lately, and any session
+   * that ran too long. Direct sessions hold no FFmpeg or disk, and a paused <video>
+   * sends no requests, so they only end on stop or at the age limit.
+   */
   async reap(): Promise<void> {
     const t = this.now();
     for (const s of this.list()) {
       if (t - s.createdAt > this.cfg.maxSessionAgeMs) await this.stop(s, "expired");
-      else if (t - s.lastAccess > this.cfg.idleTimeoutMs) await this.stop(s, "idle");
+      else if (isHls(s) && t - s.lastAccess > this.cfg.idleTimeoutMs) await this.stop(s, "idle");
     }
   }
 
@@ -222,6 +237,7 @@ export class SessionManager {
     session.generation += 1;
     const args = buildHlsArgs(session.decision, session.probe, {
       input: session.absPath,
+      inputProtocolArgs: session.remoteFile ? remoteInputArgs(this.cfg.remote, session.absPath) : undefined,
       outDir: session.dir,
       start: session.start,
       prefix: `g${session.generation}`,
@@ -247,7 +263,9 @@ export class SessionManager {
       }
       if (proc.signalCode) return; // killed by us
       session.encoder = "failed";
-      session.error = errText.trim().split("\n").slice(-3).join(" | ") || `ffmpeg exited with code ${code}`;
+      const lines = errText.trim().split("\n").slice(-3).join(" | ") || `ffmpeg exited with code ${code}`;
+      // A remote URL's signature (the query) stays out of logs and API responses.
+      session.error = session.absPath === session.relPath ? lines : lines.split(session.absPath).join(session.relPath);
       this.metrics.ffmpegFailures.inc({ mode: session.mode, extension: session.extension });
       log("error", "ffmpeg_failed", {
         sessionId: session.id,

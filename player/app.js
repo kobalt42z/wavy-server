@@ -1,6 +1,6 @@
 // Wiring for the test page. The reusable part is wavy-player.js; this file is
 // only the page around it (form, custom seek bar, info panel, error message).
-import Hls from "https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.mjs";
+import Hls from "./hls.mjs"; // served by serve.js from node_modules/hls.js
 import { WavyPlayer, describeError, formatTime, MODE_LABELS } from "./wavy-player.js";
 
 const $ = (id) => document.getElementById(id);
@@ -23,8 +23,15 @@ const timeCurrent = $("time-current");
 const timeTotal = $("time-total");
 
 // Optional ?api=https://host to talk to a service on another origin (needs CORS there).
+// With a cross-origin api, the sticky-session cookie is sent (the service must list
+// this page's origin in CORS_ORIGINS). ?credentials=0 turns that off.
 const params = new URLSearchParams(location.search);
-const player = new WavyPlayer(video, { Hls, apiBase: params.get("api") ?? "" });
+const apiBase = params.get("api") ?? "";
+const player = new WavyPlayer(video, {
+  Hls,
+  apiBase,
+  withCredentials: apiBase !== "" && params.get("credentials") !== "0",
+});
 let dragging = false;
 
 form.addEventListener("submit", (event) => {
@@ -91,6 +98,7 @@ player.addEventListener("session", (event) => {
 
 // Fatal errors after playback started (for example hls.js gave up on the stream).
 player.addEventListener("error", (event) => showError(event.detail));
+player.addEventListener("resume", () => showOverlay("Reconnecting…"));
 
 async function open(path, start) {
   if (!path) return;

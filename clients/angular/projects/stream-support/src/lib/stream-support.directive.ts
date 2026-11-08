@@ -43,6 +43,12 @@ export class StreamSupportDirective {
   readonly streamSupport = input<StreamInput>();
   /** Extra hls.js settings, used only when hls.js plays the stream. */
   readonly hlsConfig = input<Partial<HlsConfig>>({});
+  /**
+   * Send cookies with every media request, so a load balancer's sticky-session cookie
+   * reaches a playback service on another origin (its CORS_ORIGINS must list this page).
+   * Same-origin requests send cookies anyway.
+   */
+  readonly streamCredentials = input(false);
 
   /** Emits when the stream can't be played, including unsupported files. */
   readonly streamError = output<StreamError>();
@@ -77,8 +83,13 @@ export class StreamSupportDirective {
   constructor() {
     effect((onCleanup) => {
       const stream = this.stream();
-      const config = this.hlsConfig();
+      const credentials = this.streamCredentials();
+      const extra = this.hlsConfig();
+      const config: Partial<HlsConfig> = credentials
+        ? { xhrSetup: (xhr: XMLHttpRequest) => void (xhr.withCredentials = true), ...extra }
+        : extra;
       if (!this.browser) return;
+      if (credentials) this.media.crossOrigin = 'use-credentials';
       const teardown = untracked(() => this.attach(stream, config));
       onCleanup(teardown);
     });

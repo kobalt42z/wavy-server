@@ -21,8 +21,13 @@ WAVY_API_URL=http://localhost:8080 PORT=5173 bun player/serve.js
 ```
 
 Type a path relative to the media root and press Play, or open
-`http://localhost:5173/?path=cctv/cam3.dav&start=30`. The page loads hls.js 1.7.3
-from jsDelivr; use Google Chrome, the only supported browser.
+`http://localhost:5173/?path=cctv/cam3.dav&start=30`. Use Google Chrome, the only
+supported browser.
+
+hls.js comes from `node_modules` (a dev dependency, so run `bun install` first) and is
+served at `/hls.mjs`; nothing is fetched from a CDN, so the page works air-gapped.
+Without `node_modules`, put `hls.mjs` (from `hls.js/dist/`) next to `serve.js`, or set
+`HLS_JS_PATH` to its location.
 
 To talk to a service on another origin without the dev server, add
 `?api=https://media.example.com` (the service must then allow CORS).
@@ -33,7 +38,20 @@ To talk to a service on another origin without the dev server, add
 import Hls from "hls.js"; // npm i hls.js
 import { WavyPlayer, describeError } from "./wavy-player.js";
 
-const player = new WavyPlayer(document.querySelector("video"), { Hls });
+const player = new WavyPlayer(document.querySelector("video"), {
+  Hls,
+  // With AUTH_MODE=jwt: ask your main server for a playback token for this file.
+  getToken: async (path) => {
+    const res = await fetch("/media/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ path }),
+    });
+    if (!res.ok) throw new Error(`token: HTTP ${res.status}`);
+    return (await res.json()).token;
+  },
+});
 
 try {
   await player.load(path, { start: 0 });
@@ -65,6 +83,19 @@ What it does, following the dev spec's "Frontend player" section:
    close it sends `navigator.sendBeacon` to `POST /api/sessions/{id}/stop`
    (sendBeacon can only POST), with a keepalive `DELETE` as fallback. The server's
    60-second idle timeout is the backup.
+
+6. If the session is lost mid-playback (the pod restarted, or a request reached a
+   pod that doesn't hold the session and got a 404), the player starts a new session
+   at the current position and keeps playing. It fires a `resume` event
+   (`{ position, error }`) each time. A seek that hits a lost session does the same at
+   the seek target. If the new session can't start yet (a 503, or the dying pod still
+   gets the request for a moment), it tries again with a backoff for about 30 s. After
+   `maxResumes` (3) losses within a minute it gives up and fires `error`.
+   `autoResume: false` turns this off. Decode errors are never resumed.
+7. `withCredentials: true` sends cookies to a service on another origin, so the load
+   balancer's sticky-session cookie comes back (fetch `credentials: "include"`, hls.js
+   `withCredentials`, `crossorigin="use-credentials"`). The service's `CORS_ORIGINS`
+   must list the page's origin. Same-origin requests send cookies anyway.
 
 Errors are `PlaybackError`s with `code` (`unsupported`, `busy`, `network`,
 `stream`, …), `reason`, `status` and `retryAfter` (from a `503`).

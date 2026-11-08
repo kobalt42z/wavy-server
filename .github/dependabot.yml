@@ -1,0 +1,9 @@
+# Keeps the digest-pinned base images in the Dockerfile current, so security
+# fixes in Bun, FFmpeg and the distroless base land as PRs.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    target-branch: dev

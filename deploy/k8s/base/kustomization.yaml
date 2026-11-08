@@ -35,6 +35,17 @@ configMapGenerator:
       # "*". Overlays set the web app's origin(s), comma-separated.
       - CORS_ORIGINS=*
       - LOG_LEVEL=info
+      # Playback access tokens signed by the main server (README "Access tokens").
+      # The public keys come from the wavy-token-keys Secret, created by hand
+      # (deploy/k8s/README.md step 2). To fetch them from the main server instead,
+      # set JWT_JWKS_URL in the overlay and drop the token-keys volume.
+      - AUTH_MODE=jwt
+      - JWT_JWKS_FILE=/etc/wavy-token-keys/jwks.json
+      - JWT_ALGORITHMS=EdDSA
+      - JWT_ISSUER=main
+      - JWT_AUDIENCE=wavy
+      - JWT_CLOCK_TOLERANCE_SEC=60
+      - JWT_MAX_TOKEN_AGE_SEC=900
   # The codec -> mode decision table. Kept in sync with config/playback-rules.json
   # by CI (deploy/k8s/validate.sh fails if the two differ). Overlays can replace it.
   - name: wavy-playback-rules

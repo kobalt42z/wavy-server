@@ -148,6 +148,37 @@ describe("WavyPlayer.load", () => {
     expect(media.plays).toBe(1);
   });
 
+  test("getToken: one token per load, sent to probe and session start only", async () => {
+    const asked = [];
+    const { media, player, api } = setup(
+      {
+        ...sessionRoutes(
+          { mode: "direct", duration: 5, container: "mp4" },
+          { sessionId: "s1", mode: "direct", url: "/api/sessions/s1/file" },
+        ),
+      },
+      { getToken: async (path) => (asked.push(path), "tok-1") },
+    );
+    await player.load("cases/12/a.mp4");
+    expect(asked).toEqual(["cases/12/a.mp4"]);
+    expect(api.calls[0].init.headers).toMatchObject({ authorization: "Bearer tok-1" });
+    expect(api.calls[1].init.headers).toMatchObject({ authorization: "Bearer tok-1", "content-type": "application/json" });
+    expect(media.src).toBe("/api/sessions/s1/file");
+    await player.stop();
+    const del = api.calls.find((c) => c.method === "DELETE");
+    expect(del.init.headers).toBeUndefined();
+  });
+
+  test("getToken failing rejects load() with an unauthorized error and starts nothing", async () => {
+    const { player, api } = setup(sessionRoutes({ mode: "direct" }, { sessionId: "s1", mode: "direct", url: "/x" }), {
+      getToken: async () => {
+        throw new Error("403 from main");
+      },
+    });
+    await expect(player.load("a.mp4")).rejects.toMatchObject({ code: "unauthorized" });
+    expect(api.calls).toHaveLength(0);
+  });
+
   test("direct mode with a start time jumps there once metadata loads", async () => {
     const { media, player } = setup(
       sessionRoutes({ mode: "direct", duration: 60 }, { sessionId: "s1", mode: "direct", url: "/api/files/x.mp4" }),
@@ -412,9 +443,10 @@ describe("WavyPlayer stop and errors", () => {
     expect(player.state).toBe("error");
   });
 
-  test("a fatal network error is reported with the HTTP status", async () => {
+  test("a fatal network error is reported with the HTTP status (auto-resume off)", async () => {
     const { player, hls } = setup(
       sessionRoutes(PROBE_TRANSCODE, { sessionId: "s1", mode: "transcode", url: "/api/sessions/s1/index.m3u8" }),
+      { autoResume: false },
     );
     const errors = [];
     player.addEventListener("error", (e) => errors.push(e.detail));
@@ -443,6 +475,9 @@ describe("dev server", () => {
     expect(page.headers.get("content-type")).toContain("text/html");
     expect(await page.text()).toContain("Wavy test player");
     expect((await handle(new Request("http://localhost/wavy-player.js"))).status).toBe(200);
+    const hls = await handle(new Request("http://localhost/hls.mjs"));
+    expect(hls.status).toBe(200);
+    expect(hls.headers.get("content-type")).toContain("javascript");
     expect((await handle(new Request("http://localhost/serve.js"))).status).toBe(404);
     expect((await handle(new Request("http://localhost/../package.json"))).status).toBe(404);
   });
@@ -473,5 +508,157 @@ describe("dev server", () => {
     const down = await handle(new Request("http://localhost/api/probe?path=x"), "http://127.0.0.1:9");
     expect(down.status).toBe(502);
     expect((await down.json()).error).toBe("proxy");
+  });
+});
+
+describe("WavyPlayer auto-resume", () => {
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  // Each POST /api/sessions hands out the next session id.
+  const resumeRoutes = (probe, mode, url = (id) => `/api/sessions/${id}/index.m3u8`) => {
+    let n = 0;
+    return {
+      "GET /api/probe": () => [200, probe],
+      "POST /api/sessions": (body) => {
+        const id = `s${++n}`;
+        return [201, { sessionId: id, mode, url: url(id), start: body.start ?? 0 }];
+      },
+      "DELETE /api/sessions/s1": () => [204, undefined],
+      "DELETE /api/sessions/s2": () => [204, undefined],
+      "DELETE /api/sessions/s3": () => [204, undefined],
+      "DELETE /api/sessions/s4": () => [204, undefined],
+    };
+  };
+
+  test("a lost HLS session restarts at the current position", async () => {
+    const { player, api, hls, media } = setup(resumeRoutes(PROBE_TRANSCODE, "transcode"));
+    const resumes = [];
+    const errors = [];
+    player.addEventListener("resume", (e) => resumes.push(e.detail));
+    player.addEventListener("error", (e) => errors.push(e.detail));
+    await player.load("x.avi", { audioTrack: 1 });
+    media.currentTime = 42;
+    hls[0].emit("hlsError", { fatal: true, type: "networkError", response: { code: 404 } });
+    await tick();
+    await tick();
+
+    expect(resumes).toHaveLength(1);
+    expect(resumes[0].position).toBe(42);
+    expect(errors).toHaveLength(0);
+    const starts = api.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions");
+    expect(starts.at(-1).body).toEqual({ path: "x.avi", start: 42, audioTrack: 1 });
+    expect(player.sessionId).toBe("s2");
+    expect(player.offset).toBe(42);
+    expect(player.state).toBe("playing");
+    expect(hls.at(-1).source).toBe("/api/sessions/s2/index.m3u8");
+  });
+
+  test("a resume that hits a busy or vanishing pod is tried again", async () => {
+    const routes = resumeRoutes(PROBE_TRANSCODE, "transcode");
+    let probes = 0;
+    const probe = routes["GET /api/probe"];
+    // The second probe (the first resume) lands on a pod that is going away.
+    routes["GET /api/probe"] = (...args) => (++probes === 2 ? [503, { error: "capacity", reason: "busy" }, { "Retry-After": "1" }] : probe(...args));
+    const { player, hls, media } = setup(routes);
+    const errors = [];
+    player.addEventListener("error", (e) => errors.push(e.detail));
+    await player.load("x.avi");
+    media.currentTime = 50;
+    hls[0].emit("hlsError", { fatal: true, type: "networkError", response: { code: 404 } });
+    await tick();
+    await tick();
+    expect(player.state).toBe("error");
+    await new Promise((r) => setTimeout(r, 1100));
+    await tick();
+    await tick();
+    expect(errors).toHaveLength(0);
+    expect(player.state).toBe("playing");
+    expect(player.offset).toBe(50);
+    expect(probes).toBe(3);
+  });
+
+  test("gives up after maxResumes losses in a minute", async () => {
+    const { player, hls } = setup(resumeRoutes(PROBE_TRANSCODE, "transcode"), { maxResumes: 2 });
+    const errors = [];
+    player.addEventListener("error", (e) => errors.push(e.detail));
+    await player.load("x.avi");
+    for (let i = 0; i < 3; i++) {
+      hls.at(-1).emit("hlsError", { fatal: true, type: "networkError", response: { code: 404 } });
+      await tick();
+      await tick();
+    }
+    expect(hls).toHaveLength(3); // the first one + 2 resumes
+    expect(errors).toHaveLength(1);
+    expect(errors[0].status).toBe(404);
+    expect(player.state).toBe("error");
+  });
+
+  test("a seek on a lost session starts a new one at the target", async () => {
+    const routes = resumeRoutes(PROBE_TRANSCODE, "transcode");
+    routes["POST /api/sessions/s1/seek"] = () => [404, { error: "not_found", reason: "The session does not exist or has ended." }];
+    const { player, api } = setup(routes);
+    await player.load("x.avi");
+    await player.seek(200);
+    await tick();
+    await tick();
+    const starts = api.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions");
+    expect(starts.at(-1).body).toEqual({ path: "x.avi", start: 200 });
+    expect(player.sessionId).toBe("s2");
+    expect(player.state).toBe("playing");
+  });
+
+  test("a direct file that stops loading mid-playback resumes", async () => {
+    const probe = { ...PROBE_TRANSCODE, mode: "direct" };
+    const { player, media, api } = setup(resumeRoutes(probe, "direct", (id) => `/api/sessions/${id}/file`));
+    await player.load("a.mp4");
+    media.currentTime = 30;
+    media.error = { code: 2 };
+    media.dispatchEvent(new Event("error"));
+    await tick();
+    await tick();
+    expect(api.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions").at(-1).body).toEqual({ path: "a.mp4", start: 30 });
+    expect(media.src).toBe("/api/sessions/s2/file");
+  });
+
+  test("a decode error on a direct file is not resumed", async () => {
+    const probe = { ...PROBE_TRANSCODE, mode: "direct" };
+    const { player, media, api } = setup(resumeRoutes(probe, "direct", (id) => `/api/sessions/${id}/file`));
+    await player.load("a.mp4");
+    media.currentTime = 30;
+    media.error = { code: 3 };
+    media.dispatchEvent(new Event("error"));
+    await tick();
+    expect(api.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions")).toHaveLength(1);
+    expect(player.sessionId).toBe("s1");
+  });
+});
+
+describe("WavyPlayer withCredentials", () => {
+  test("off by default: no credentials on API calls, no xhrSetup", async () => {
+    const { player, api, hls } = setup(
+      sessionRoutes(PROBE_TRANSCODE, { sessionId: "s1", mode: "transcode", url: "/api/sessions/s1/index.m3u8" }),
+    );
+    await player.load("x.mov");
+    expect(api.calls.every((c) => c.init.credentials === undefined)).toBe(true);
+    expect(hls[0].config.xhrSetup).toBeUndefined();
+  });
+
+  test("sends cookies on API calls, hls.js requests and the direct file", async () => {
+    const { player, api, hls } = setup(
+      sessionRoutes(PROBE_TRANSCODE, { sessionId: "s1", mode: "transcode", url: "/api/sessions/s1/index.m3u8" }),
+      { withCredentials: true, apiBase: "https://media.example.com" },
+    );
+    await player.load("x.mov");
+    await player.stop();
+    expect(api.calls.map((c) => c.init.credentials)).toEqual(["include", "include", "include"]);
+    const xhr = {};
+    hls[0].config.xhrSetup(xhr);
+    expect(xhr.withCredentials).toBe(true);
+
+    const direct = setup(
+      sessionRoutes({ ...PROBE_TRANSCODE, mode: "direct" }, { sessionId: "s1", mode: "direct", url: "/api/sessions/s1/file" }),
+      { withCredentials: true },
+    );
+    await direct.player.load("a.mp4");
+    expect(direct.media.crossOrigin).toBe("use-credentials");
   });
 });

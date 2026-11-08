@@ -80,12 +80,18 @@ export function formatTime(seconds) {
 // How long to keep retrying a playlist that is not there yet (FFmpeg starting up).
 const MANIFEST_RETRIES = 20;
 const MANIFEST_RETRY_MS = 500;
+/** Auto-resume allows `maxResumes` restarts within this window. */
+const RESUME_WINDOW_MS = 60_000;
+/** Retries of one resume whose new session couldn't start (busy or vanishing pod). */
+const RESUME_RETRIES = 5;
 
 /**
  * Events (all CustomEvent, read event.detail):
  * - "statechange": { state } — idle | probing | starting | playing | seeking | error
  * - "session":     { path, sessionId, mode, url, probe }
  * - "error":       PlaybackError — a fatal error after load() resolved (e.g. hls.js gave up)
+ * - "resume":      { position, error } — the session was lost (pod restarted, request
+ *                  routed to another pod, …); a new one is starting at `position`
  */
 export class WavyPlayer extends EventTarget {
   /**
@@ -94,8 +100,19 @@ export class WavyPlayer extends EventTarget {
    *   Hls?: any,                    hls.js constructor (required for every mode but direct)
    *   apiBase?: string,             e.g. "https://media.example.com"; default same origin
    *   fetch?: typeof fetch,
+   *   getToken?: (path: string) => string | Promise<string>,
+   *                                 access token for this file, from the main server.
+   *                                 Sent as "Authorization: Bearer" to probe and session
+   *                                 start only; playback itself uses the session URL.
    *   hlsConfig?: object,           extra hls.js config, merged over the defaults
    *   stopOnPageHide?: boolean,     end the session when the tab closes (default true)
+   *   autoResume?: boolean,         when the session is lost, start a new one at the same
+   *                                 position (default true)
+   *   maxResumes?: number,          resumes allowed per minute before giving up (default 3)
+   *   withCredentials?: boolean,    send cookies to a service on another origin, so the load
+   *                                 balancer's sticky-session cookie comes back (default
+   *                                 false; same-origin requests send cookies anyway). The
+   *                                 service must list the page's origin in CORS_ORIGINS.
    * }} [options]
    */
   constructor(media, options = {}) {
@@ -104,7 +121,11 @@ export class WavyPlayer extends EventTarget {
     this.Hls = options.Hls;
     this.apiBase = (options.apiBase ?? "").replace(/\/+$/, "");
     this._fetch = options.fetch ?? ((...args) => globalThis.fetch(...args));
+    this._getToken = options.getToken;
     this.hlsConfig = options.hlsConfig ?? {};
+    this.autoResume = options.autoResume ?? true;
+    this.maxResumes = options.maxResumes ?? 3;
+    this.withCredentials = options.withCredentials ?? false;
 
     this.state = "idle";
     this.path = null;
@@ -118,6 +139,9 @@ export class WavyPlayer extends EventTarget {
     this._hls = null;
     this._loadToken = 0;
     this._mediaRecoveries = 0;
+    this._resumes = [];
+    this._audioTrack = undefined;
+    this._onMediaError = () => this._onDirectError();
 
     this._onPageHide = () => this._stopOnUnload();
     if ((options.stopOnPageHide ?? true) && typeof window !== "undefined") {
@@ -151,8 +175,8 @@ export class WavyPlayer extends EventTarget {
   }
 
   /** GET /api/probe. Resolves with the probe JSON, rejects with PlaybackError. */
-  probe(path) {
-    return this._request("GET", `/api/probe?path=${encodeURIComponent(path)}`);
+  async probe(path, headers) {
+    return this._request("GET", `/api/probe?path=${encodeURIComponent(path)}`, undefined, headers ?? (await this._authHeaders(path)));
   }
 
   /**
@@ -164,15 +188,26 @@ export class WavyPlayer extends EventTarget {
    *   start: position in seconds; audioTrack: an `audio[].track` value from the probe
    */
   async load(path, opts = {}) {
+    this._resumes = [];
+    return this._load(path, opts);
+  }
+
+  async _load(path, opts) {
     const token = ++this._loadToken;
     const start = Math.max(0, Number(opts.start) || 0);
     await this.stop();
     if (token !== this._loadToken) return;
 
     this.path = path;
+    this._audioTrack = opts.audioTrack;
+    // Report the target position while the new session starts (a resume or a start offset).
+    this.offset = start;
     try {
       this._setState("probing");
-      const probe = await this.probe(path);
+      // One token covers the probe and the session start.
+      const auth = await this._authHeaders(path);
+      if (token !== this._loadToken) return;
+      const probe = await this.probe(path, auth);
       if (token !== this._loadToken) return;
       this.probeResult = probe;
       if (probe.mode === "unsupported") {
@@ -183,7 +218,7 @@ export class WavyPlayer extends EventTarget {
       const body = { path };
       if (start > 0) body.start = start;
       if (opts.audioTrack !== undefined && opts.audioTrack !== null) body.audioTrack = opts.audioTrack;
-      const session = await this._request("POST", "/api/sessions", body);
+      const session = await this._request("POST", "/api/sessions", body, auth);
       if (token !== this._loadToken) {
         // A newer load() started while we waited: drop this session.
         this._deleteSession(session.sessionId);
@@ -260,6 +295,8 @@ export class WavyPlayer extends EventTarget {
     } catch (err) {
       if (token !== this._loadToken) return;
       const error = toPlaybackError(err);
+      // The session is gone (another pod answered, or the pod restarted): start a new one there.
+      if ((error.status === 404 || error.code === "network") && this._resume(target, error)) return;
       this._setState("error");
       throw error;
     }
@@ -291,6 +328,8 @@ export class WavyPlayer extends EventTarget {
 
   _attachDirect(url, start) {
     this._destroyHls();
+    this.media.addEventListener?.("error", this._onMediaError);
+    if (this.withCredentials) this.media.crossOrigin = "use-credentials";
     this.media.src = this._resolve(url);
     if (start > 0) {
       const jump = () => {
@@ -336,6 +375,14 @@ export class WavyPlayer extends EventTarget {
           },
         },
       },
+      // Playlist and segment requests carry the sticky-session cookie cross-origin.
+      ...(this.withCredentials
+        ? {
+            xhrSetup: (xhr) => {
+              xhr.withCredentials = true;
+            },
+          }
+        : {}),
       ...this.hlsConfig,
     });
 
@@ -349,6 +396,11 @@ export class WavyPlayer extends EventTarget {
         return;
       }
       const status = data.response?.code;
+      if (data.type === types.NETWORK_ERROR) {
+        const position = this.currentTime;
+        this._destroyHls();
+        if (this._resume(position, new PlaybackError("stream", "The session was lost.", { status, cause: data }))) return;
+      }
       let reason;
       if (data.type === types.NETWORK_ERROR) {
         reason = status
@@ -377,7 +429,56 @@ export class WavyPlayer extends EventTarget {
     return false;
   }
 
+  /**
+   * Starts a new session at `position` after the current one was lost. Returns
+   * false when auto-resume is off or was used too often in the last minute.
+   */
+  _resume(position, error, attempt = 0) {
+    if (!this.autoResume || !this.path) return false;
+    if (attempt === 0) {
+      const now = Date.now();
+      this._resumes = this._resumes.filter((t) => now - t < RESUME_WINDOW_MS);
+      if (this._resumes.length >= this.maxResumes) return false;
+      this._resumes.push(now);
+      this._emit("resume", { position: Math.max(0, Number(position) || 0), error });
+    }
+    const path = this.path;
+    const start = Math.max(0, Number(position) || 0);
+    const token = this._loadToken + 1; // the token the _load below takes
+    this._load(path, { start, audioTrack: this._audioTrack }).catch((err) => {
+      const error = toPlaybackError(err);
+      // A pod that just went away keeps getting its browsers' requests until the load
+      // balancer drops it (a few seconds), and a busy pod answers 503: try again, backing
+      // off (2, 4, 8, 8, 8 s: about 30 s in all). These retries don't count as resumes.
+      const transient = error.code === "network" || error.code === "busy" || error.status >= 500;
+      if (transient && token === this._loadToken && attempt < RESUME_RETRIES) {
+        const delay = Math.max(1, error.retryAfter ?? Math.min(8, 2 ** (attempt + 1))) * 1000;
+        setTimeout(() => {
+          if (token === this._loadToken) this._resume(start, error, attempt + 1);
+        }, delay);
+        return;
+      }
+      this._emit("error", error);
+    });
+    return true;
+  }
+
+  /** A direct file stopped loading mid-playback (its session is gone): resume. */
+  _onDirectError() {
+    if (this.mode !== "direct" || !this.sessionId) return;
+    const code = this.media.error?.code;
+    // 2 = MEDIA_ERR_NETWORK, 4 = MEDIA_ERR_SRC_NOT_SUPPORTED (what a 404 looks like).
+    // A decode error (3) is the file itself and would fail again.
+    if (code !== 2 && code !== 4) return;
+    if (!(this.media.currentTime > 0)) return; // never played: not a lost session
+    const position = this.currentTime;
+    if (this._resume(position, new PlaybackError("stream", "The session was lost.", { cause: this.media.error }))) return;
+    this._setState("error");
+    this._emit("error", new PlaybackError("stream", "The file stopped loading. Press Play to restart."));
+  }
+
   _detach() {
+    this.media.removeEventListener?.("error", this._onMediaError);
     this._destroyHls();
     if (this.media.getAttribute?.("src") || this.media.src) {
       this.media.removeAttribute("src");
@@ -402,7 +503,7 @@ export class WavyPlayer extends EventTarget {
   async _deleteSession(id) {
     if (!id) return;
     try {
-      await this._fetch(this._resolve(`/api/sessions/${encodeURIComponent(id)}`), { method: "DELETE" });
+      await this._fetch(this._resolve(`/api/sessions/${encodeURIComponent(id)}`), { method: "DELETE", ...this._credentials() });
     } catch {
       // The server also ends sessions after 60 s without segment requests.
     }
@@ -425,19 +526,34 @@ export class WavyPlayer extends EventTarget {
       this._fetch(this._resolve(`/api/sessions/${encodeURIComponent(id)}`), {
         method: "DELETE",
         keepalive: true,
+        ...this._credentials(),
       }).catch(() => {});
     } catch {
       // ignore
     }
   }
 
-  async _request(method, path, body) {
+  async _authHeaders(path) {
+    if (!this._getToken) return undefined;
+    let t;
+    try {
+      t = await this._getToken(path);
+    } catch (err) {
+      if (err instanceof PlaybackError) throw err;
+      throw new PlaybackError("unauthorized", "You don't have access to this file.", { cause: err });
+    }
+    return t ? { authorization: `Bearer ${t}` } : undefined;
+  }
+
+  async _request(method, path, body, extraHeaders) {
     let res;
+    const headers = { ...(body ? { "content-type": "application/json" } : {}), ...(extraHeaders ?? {}) };
     try {
       res = await this._fetch(this._resolve(path), {
         method,
-        headers: body ? { "content-type": "application/json" } : undefined,
+        headers: Object.keys(headers).length ? headers : undefined,
         body: body ? JSON.stringify(body) : undefined,
+        ...this._credentials(),
       });
     } catch (err) {
       throw new PlaybackError("network", "Could not reach the playback service.", { cause: err });
@@ -469,6 +585,10 @@ export class WavyPlayer extends EventTarget {
       throw new PlaybackError("bad-response", "The playback service sent an unreadable response.", { status: res.status });
     }
     return data;
+  }
+
+  _credentials() {
+    return this.withCredentials ? { credentials: "include" } : {};
   }
 
   _resolve(url) {

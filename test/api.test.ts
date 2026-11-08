@@ -54,10 +54,13 @@ describe("POST /api/sessions plays every supported sample", () => {
       expect(s.sessionId).toMatch(/^[A-Za-z0-9_-]{24}$/);
 
       if (spec.expected === "direct") {
-        expect(s.url).toBe(`/api/files/${enc(spec.file)}`);
+        expect(s.url).toBe(`/api/sessions/${s.sessionId}/file`);
         const file = await fetch(srv.base + s.url, { headers: { Range: "bytes=0-15" } });
         expect(file.status).toBe(206);
         expect((await file.arrayBuffer()).byteLength).toBe(16);
+        // The same bytes as the raw file endpoint.
+        const raw = await fetch(`${srv.base}/api/files/${enc(spec.file)}`, { headers: { Range: "bytes=0-15" } });
+        expect(Buffer.from(await raw.arrayBuffer())).toEqual(Buffer.from(await (await fetch(srv.base + s.url, { headers: { Range: "bytes=0-15" } })).arrayBuffer()));
       } else {
         expect(s.url).toStartWith(`/api/sessions/${s.sessionId}/index.m3u8`);
         const pl = await fetch(srv.base + s.url);
@@ -202,4 +205,27 @@ test("CORS preflight is answered", async () => {
   });
   expect(res.status).toBe(204);
   expect(res.headers.get("access-control-allow-origin")).toBe("*");
+});
+
+test("CORS with listed origins allows credentials (sticky-session cookie), with * it doesn't", async () => {
+  expect(
+    (
+      await fetch(`${srv.base}/api/sessions`, {
+        method: "OPTIONS",
+        headers: { Origin: "http://app.example", "Access-Control-Request-Method": "POST" },
+      })
+    ).headers.get("access-control-allow-credentials"),
+  ).toBeNull();
+
+  const listed = await startServer(await samplesDir(), { corsOrigins: ["http://app.example"] });
+  try {
+    const res = await fetch(`${listed.base}/api/sessions`, {
+      method: "OPTIONS",
+      headers: { Origin: "http://app.example", "Access-Control-Request-Method": "POST" },
+    });
+    expect(res.headers.get("access-control-allow-origin")).toBe("http://app.example");
+    expect(res.headers.get("access-control-allow-credentials")).toBe("true");
+  } finally {
+    listed.close();
+  }
 });

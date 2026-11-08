@@ -102,6 +102,9 @@ spec:
             - name: rules
               mountPath: /etc/wavy
               readOnly: true
+            - name: token-keys
+              mountPath: /etc/wavy-token-keys
+              readOnly: true
       volumes:
         - name: media
           persistentVolumeClaim:
@@ -115,3 +118,12 @@ spec:
         - name: rules
           configMap:
             name: wavy-playback-rules
+        # Public keys (JWKS) of the main server's token signing key. Not a secret
+        # strictly, but kept out of git like the SMB credentials. The service reads
+        # it at startup: after a key rotation run `kubectl rollout restart`.
+        - name: token-keys
+          secret:
+            secretName: wavy-token-keys
+            items:
+              - key: jwks.json
+                path: jwks.json

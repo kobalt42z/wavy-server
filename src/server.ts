@@ -26,7 +26,13 @@ log("info", "server_started", {
   mediaRoot: config.mediaRoot,
   sessionsDir: config.sessionsDir,
   maxTranscodes: config.maxTranscodes,
+  auth: config.auth.mode,
+  tokenIssuer: config.auth.mode === "jwt" ? config.auth.issuer : undefined,
+  tokenKeys: config.auth.mode === "jwt" ? (config.auth.jwksUrl ?? "JWT_JWKS_FILE / JWT_JWKS") : undefined,
 });
+if (config.auth.mode === "none") {
+  log("warn", "auth_disabled", { reason: "AUTH_MODE=none: anyone who can reach the API can play any file. Set AUTH_MODE=jwt in production." });
+}
 
 let shuttingDown = false;
 const shutdown = async (signal: string) => {

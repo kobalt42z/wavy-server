@@ -2,3 +2,6 @@ node_modules/
 samples/
 *.csv
 .DS_Store
+
+# Token signing keys made by scripts/gen-token-keys.ts
+keys/

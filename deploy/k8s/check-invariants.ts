@@ -62,12 +62,28 @@ for (const pvc of find("PersistentVolumeClaim")) {
 }
 if (find("Secret").length > 0) fail("rendered output contains a Secret; credentials must not live in git");
 
+// Playback needs an access token from the main server.
+const envMaps = find("ConfigMap").filter((m) => String(m.metadata.name).startsWith("wavy-server-env"));
+if (envMaps.length !== 1) fail(`expected 1 wavy-server-env ConfigMap, found ${envMaps.length}`);
+for (const m of envMaps) {
+  if (m.data?.AUTH_MODE !== "jwt") fail(`${m.metadata.name}: AUTH_MODE must be jwt (got ${m.data?.AUTH_MODE})`);
+  if (!m.data?.JWT_JWKS_FILE && !m.data?.JWT_JWKS_URL) fail(`${m.metadata.name}: set JWT_JWKS_FILE or JWT_JWKS_URL`);
+}
+
 // Sticky sessions.
 for (const ing of find("Ingress")) {
   if (ing.metadata.annotations?.["nginx.ingress.kubernetes.io/affinity"] !== "cookie") {
     fail(`Ingress ${ing.metadata.name}: cookie affinity is missing`);
   }
 }
+for (const proxy of find("HTTPProxy")) {
+  for (const route of proxy.spec?.routes ?? []) {
+    if (route.loadBalancerPolicy?.strategy !== "Cookie") {
+      fail(`HTTPProxy ${proxy.metadata.name}: route without loadBalancerPolicy.strategy Cookie`);
+    }
+  }
+}
+if (find("Ingress").length + find("HTTPProxy").length === 0) fail("no Ingress or HTTPProxy: nothing routes browsers to their session's pod");
 
 // Every namespaced object lands in the same namespace.
 const clusterScoped = new Set(["Namespace", "PersistentVolume"]);
