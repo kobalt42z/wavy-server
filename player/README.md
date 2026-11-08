@@ -21,8 +21,13 @@ WAVY_API_URL=http://localhost:8080 PORT=5173 bun player/serve.js
 ```
 
 Type a path relative to the media root and press Play, or open
-`http://localhost:5173/?path=cctv/cam3.dav&start=30`. The page loads hls.js 1.7.3
-from jsDelivr; use Google Chrome, the only supported browser.
+`http://localhost:5173/?path=cctv/cam3.dav&start=30`. Use Google Chrome, the only
+supported browser.
+
+hls.js comes from `node_modules` (a dev dependency, so run `bun install` first) and is
+served at `/hls.mjs`; nothing is fetched from a CDN, so the page works air-gapped.
+Without `node_modules`, put `hls.mjs` (from `hls.js/dist/`) next to `serve.js`, or set
+`HLS_JS_PATH` to its location.
 
 To talk to a service on another origin without the dev server, add
 `?api=https://media.example.com` (the service must then allow CORS).
