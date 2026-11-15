@@ -31,7 +31,7 @@ ADD --chmod=755 --checksum=sha256:eae1d3aa50c48fb23b8cbdf4e369d0910dfc538566bfd0
     https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-static-arm64 /tini
 FROM tini-${TARGETARCH} AS tini
 
-FROM gcr.io/distroless/base-nossl-debian13:latest@sha256:d710a5c8bfe4cf7e726d7e1afd73e363a9fb02c2a11ad893d2d6185c1b9a89cb
+FROM gcr.io/distroless/base-nossl-debian13:latest@sha256:3a2dbf10c2fdafe5865e2b03a4a3b9b23f2e280229a81730415379b76dc70592
 
 # tini as PID 1 so signals reach Bun and FFmpeg children are always reaped.
 COPY --from=tini /tini /usr/bin/tini
