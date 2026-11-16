@@ -23,6 +23,9 @@ MEDIA_ROOT=./samples bun run start   # API on :8080
 
 ## Playback API
 
+For a step-by-step description of what each route does inside, see
+[docs/api-routes.md](docs/api-routes.md).
+
 All paths are relative to the media root (`MEDIA_ROOT`, `/media` in the container).
 Errors are `{ "error": "<code>", "reason": "<sentence for the user>" }`.
 
