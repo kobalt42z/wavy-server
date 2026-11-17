@@ -23,6 +23,8 @@ export interface AppDeps {
 }
 
 const FILES_PREFIX = "/api/files/";
+/** How long a waveform request waits for a free decode slot before a 503. */
+const PEAKS_QUEUE_WAIT_MS = 15_000;
 /** Path segment of a direct session's file. Can't clash with SEGMENT_NAME or the playlist. */
 const SESSION_FILE_NAME = "file";
 
@@ -140,10 +142,16 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
       peaksCache.delete(key);
       peaksCache.set(key, result);
     } else {
-      if (peaksRunning >= config.peaksConcurrency) {
-        throw new ApiError(503, "busy", "The server is busy making other waveforms. Try again shortly.", {
-          "Retry-After": String(config.retryAfterSec),
-        });
+      // A page of voice messages asks for all its waveforms at once: wait for a free slot
+      // for a while before answering busy.
+      const deadline = Date.now() + PEAKS_QUEUE_WAIT_MS;
+      while (peaksRunning >= config.peaksConcurrency) {
+        if (Date.now() >= deadline || config.peaksConcurrency === 0) {
+          throw new ApiError(503, "busy", "The server is busy making other waveforms. Try again shortly.", {
+            "Retry-After": String(config.retryAfterSec),
+          });
+        }
+        await Bun.sleep(50);
       }
       peaksRunning++;
       try {

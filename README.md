@@ -6,8 +6,9 @@ probed with `ffprobe` and gets the cheapest playback mode that works. See the de
 spec ("Web Media Playback Service — Dev Spec") for the full design.
 
 Contents: the playback API (`src/`), sample files and a scan tool (`scripts/`),
-Kubernetes manifests (`deploy/k8s/`), a test player (`player/`) and an Angular client
-(`clients/angular/`).
+Kubernetes manifests (`deploy/k8s/`), a test player (`player/`) and the Angular package
+`@wavy/angular` with a video player and a voice-message audio player
+([`clients/angular/`](clients/angular/projects/wavy/README.md)).
 
 ## Requirements
 
@@ -29,6 +30,7 @@ Errors are `{ "error": "<code>", "reason": "<sentence for the user>" }`.
 | Endpoint | Purpose | Response |
 | --- | --- | --- |
 | `GET /api/probe?path=` 🔑 | ffprobe + decision table | `{ path, mode, reason, duration, container, size, video, audio: [{ track, codec, channels, lang }], subtitles, plan }` |
+| `GET /api/peaks?path=&count=100&audioTrack=0` 🔑 | Waveform: the loudest sample in each of `count` (1 to 1000) equal slices of the audio, from 0 to 1. Decoded once per file and cached; `path` defaults to the token's file. | `{ path, duration, count, peaks: number[] }`. `422 no_audio` / `too_long`, `503 busy` with `Retry-After`. |
 | `POST /api/sessions` 🔑 `{ path?, start?, audioTrack? }` | Start playback. `path` defaults to the token's file. | `201 { sessionId, mode, url, start, duration, reason }`. `url` is `/api/sessions/{id}/file` for `direct`, else the HLS playlist. |
 | `GET /api/sessions/{id}` | Session state | `{ sessionId, mode, url, path, start, duration, encoder, error }` |
 | `GET /api/sessions/{id}/index.m3u8` | HLS playlist (waits for the first segment) | `application/vnd.apple.mpegurl` |
@@ -90,8 +92,8 @@ payload { "sub": "user-42", "path": "cases/12/cam3.mp4", "iss": "main", "aud": "
   `JWT_JWKS_URL`, picked by `kid`), `alg` in `JWT_ALGORITHMS` (asymmetric only), `iss`,
   `aud`, `exp` with `JWT_CLOCK_TOLERANCE_SEC` of slack, `iat` no older than
   `JWT_MAX_TOKEN_AGE_SEC`, and `sub`, `jti`, `path` present.
-- The token is checked once, at `GET /api/probe`, `POST /api/sessions` and
-  `/api/files`. From then on the session URL (`/api/sessions/{id}/…`, 144 random bits)
+- The token is checked once, at `GET /api/probe`, `GET /api/peaks`, `POST /api/sessions`
+  and `/api/files`. From then on the session URL (`/api/sessions/{id}/…`, 144 random bits)
   carries the playlist, segments, seeks and Range requests, so hls.js and `<video src>`
   need no token, and a token that expires mid-video doesn't stop playback.
 - Wavy holds only public keys: it can't mint tokens. A JWKS that contains a private
@@ -168,6 +170,9 @@ Plus the default process metrics, prefixed `wavy_`.
 | `X264_PRESET`, `X264_CRF` | `veryfast`, `23` | Full transcode quality. |
 | `AUDIO_BITRATE` | `160k` | AAC bitrate. |
 | `RETRY_AFTER_SEC` | `5` | `Retry-After` on 503. |
+| `PEAKS_CONCURRENCY` | `2` | Waveform decodes (`GET /api/peaks`) running at once per pod. Others wait up to 15 s, then get `503`. |
+| `PEAKS_MAX_DURATION_SEC` | `7200` | Files longer than this get no waveform (`422 too_long`). |
+| `PEAKS_TIMEOUT_MS` | `60000` | A waveform decode running longer than this is killed (`502`). |
 | `CORS_ORIGINS` | `*` | Allowed browser origins, comma-separated. A list (not `*`) also allows credentials, so a load balancer's sticky-session cookie works cross-origin. |
 | `AUTH_MODE` | `none` | `jwt` requires an access token to start playback; `none` is open. |
 | `JWT_JWKS_FILE` / `JWT_JWKS` / `JWT_JWKS_URL` | | The main server's public keys: a JWKS file, inline JWKS JSON, or a URL (cached 10 min, refetched for an unknown `kid`). |

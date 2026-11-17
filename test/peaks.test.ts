@@ -64,3 +64,16 @@ test("buildPeaksArgs maps the chosen audio stream and decodes mono PCM", () => {
   expect(args.join(" ")).toContain("-ac 1 -ar 4000 -f s16le");
   expect(() => buildPeaksArgs({ input: "x", probe, audioTrack: 5 })).toThrow();
 });
+
+test("GET /api/peaks answers 503 busy with Retry-After when decoding is off", async () => {
+  const { samplesDir, startServer } = await import("./helpers/server.ts");
+  const srv = await startServer(await samplesDir(), { peaksConcurrency: 0 });
+  try {
+    const res = await fetch(`${srv.base}/api/peaks?path=audio/mp3.mp3`);
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("5");
+    expect(await res.json()).toMatchObject({ error: "busy" });
+  } finally {
+    await srv.close();
+  }
+}, 180_000);
