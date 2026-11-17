@@ -124,6 +124,10 @@ browser's Range requests passed on.
 - Wavy reads the size with a one-byte range GET, because presigned URLs aren't valid for
   HEAD. The URL's query (the signature) is never logged or returned; logs and
   responses show origin + path.
+- Remote AVI files are read with `-use_odml 0`. DVR/NVR exports split their OpenDML
+  index into small chunks through the file, and FFmpeg seeks to each one on open: cheap
+  on the share, but one HTTP request per chunk on S3, so a 1-hour 4 GB export timed out
+  the probe. Duration and seeking still work without it.
 - The link must stay valid for the whole session: a seek or a transcode restart opens it
   again. Presign for at least `SESSION_MAX_AGE_MS`, or as long as a viewing can last.
 

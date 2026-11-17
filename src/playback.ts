@@ -72,6 +72,7 @@ export class PlaybackAnalyzer {
         ffprobePath: this.ffprobePath,
         extension,
         baseInputArgs: file.remote ? this.remoteInputArgs(file.absPath) : undefined,
+        remote: file.remote,
       });
       stopTimer();
       analysis = outcome.ok

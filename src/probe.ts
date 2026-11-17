@@ -47,7 +47,21 @@ export interface ProbeOptions {
   extension?: string;
   /** Input options put before every attempt, not kept in `inputArgs` (remote protocol options). */
   baseInputArgs?: string[];
+  /** The file is read over HTTP, where every seek is a new request (see REMOTE_AVI_ARGS). */
+  remote?: boolean;
 }
+
+/**
+ * Remote AVI files are read without their OpenDML index. That index is split into
+ * small chunks spread through the file (DVR/NVR exports often write one per second),
+ * and FFmpeg seeks to each one when it opens the file. On disk that's cheap; over
+ * HTTP every seek is a new request, so a 1-hour, 4 GB export takes thousands of
+ * requests and the probe times out. Without it FFmpeg still gets the duration from
+ * the headers and seeks fine (by idx1 where there is one, by scanning otherwise).
+ */
+export const REMOTE_AVI_ARGS = ["-use_odml", "0"];
+
+const isAvi = (container: string) => container.split(",").includes("avi");
 
 /**
  * Runs ffprobe on a file. Uses the extension's input override if one exists, and
@@ -60,13 +74,17 @@ export async function probeFile(path: string, rules: PlaybackRules, opts: ProbeO
   const attempts: string[][] = override ? [override] : [[], ...rules.probeFallbackFormats.map((f) => ["-f", f])];
 
   let lastError = "ffprobe could not read the file";
-  for (const inputArgs of attempts) {
-    const res = await runFfprobe(path, [...base, ...inputArgs], opts);
+  // ffprobe ignores the AVI option for other formats; FFmpeg would refuse it, so it
+  // only goes into the result's inputArgs when the file turns out to be AVI.
+  const remoteArgs = opts.remote ? REMOTE_AVI_ARGS : [];
+  for (const attempt of attempts) {
+    const res = await runFfprobe(path, [...base, ...remoteArgs, ...attempt], opts);
     if (!res.ok) {
       lastError = res.error;
       continue;
     }
-    const probe = parseFfprobe(res.json, inputArgs);
+    let probe = parseFfprobe(res.json, attempt);
+    if (opts.remote && isAvi(probe.container)) probe = { ...probe, inputArgs: [...REMOTE_AVI_ARGS, ...attempt] };
     if (probe.video.length === 0 && probe.audio.length === 0) {
       lastError = "no audio or video stream found";
       continue;

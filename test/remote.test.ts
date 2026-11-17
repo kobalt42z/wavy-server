@@ -11,10 +11,13 @@ import { join } from "node:path";
 import { loadConfig, type AuthConfig } from "../src/config.ts";
 import { stripRootPrefix } from "../src/media-path.ts";
 import { hostAllowed } from "../src/remote.ts";
+import { writeOdmlAvi } from "./helpers/odml-avi.ts";
 import { samplesDir, startServer, type TestServer } from "./helpers/server.ts";
 
 let samples: string;
 let media: string;
+/** Files only the S3 stand-in serves (bucket keys under extra/). */
+let extra: string;
 let priv: CryptoKey;
 let pubJwk: JWK;
 let s3: ReturnType<typeof Bun.serve>;
@@ -46,6 +49,9 @@ beforeAll(async () => {
   media = mkdtempSync(join(tmpdir(), "wavy-remote-media-"));
   mkdirSync(join(media, "cases/12"), { recursive: true });
   copyFileSync(join(samples, "video/mp4_h264_aac.mp4"), join(media, "cases/12/clip.mp4"));
+  extra = mkdtempSync(join(tmpdir(), "wavy-remote-extra-"));
+  // DVR-style OpenDML AVI: an index chunk per video frame per stream, no idx1.
+  writeOdmlAvi(join(samples, "video/avi_h264_g711.avi"), join(extra, "dvr.avi"), 1);
 
   const kp = await generateKeyPair("EdDSA", { crv: "Ed25519" });
   priv = kp.privateKey;
@@ -62,7 +68,8 @@ beforeAll(async () => {
       if (u.searchParams.get("X-Amz-Signature") !== "ok") return new Response("AccessDenied", { status: 403 });
       if (u.pathname === "/bucket/redirect.mp4") return Response.redirect("http://169.254.169.254/latest/meta-data", 302);
       const key = u.pathname.replace(/^\/bucket\//, "");
-      const file = Bun.file(join(samples, decodeURIComponent(key)));
+      const name = decodeURIComponent(key);
+      const file = Bun.file(name.startsWith("extra/") ? join(extra, name.slice(6)) : join(samples, name));
       if (!(await file.exists())) return new Response("NoSuchKey", { status: 404 });
       const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.get("range") ?? "");
       if (range) {
@@ -88,6 +95,7 @@ afterAll(async () => {
   await srv?.close();
   await s3?.stop(true);
   if (media) rmSync(media, { recursive: true, force: true });
+  if (extra) rmSync(extra, { recursive: true, force: true });
 });
 
 describe("host allowlist", () => {
@@ -147,6 +155,33 @@ describe("a token with an http(s) URL plays from that URL", () => {
     const seek = await post(`${srv.base}/api/sessions/${s.sessionId}/seek`, { position: 1 });
     expect(seek.status).toBe(200);
     expect((await fetch(srv.base + ((await seek.json()) as { url: string }).url)).status).toBe(200);
+    await fetch(`${srv.base}/api/sessions/${s.sessionId}`, { method: "DELETE" });
+  }, 60_000);
+
+  test("AVI with a split OpenDML index: probed and played without a request per index chunk", async () => {
+    // FFmpeg would otherwise seek to every ix## chunk (here 2 per frame, 100 in all),
+    // and every seek is a new request: a 1-hour 4 GB export timed out the probe.
+    const url = signed("extra/dvr.avi");
+    s3Hits = [];
+    const probe = await fetch(`${srv.base}/api/probe`, { headers: { Authorization: `Bearer ${await token(url)}` } });
+    expect(probe.status).toBe(200);
+    const body = (await probe.json()) as { mode: string; duration: number; video: { codec: string } };
+    expect(body).toMatchObject({ mode: "transcode-audio", video: { codec: "h264" } });
+    expect(body.duration).toBeCloseTo(2, 0);
+    expect(s3Hits.length).toBeLessThan(10);
+
+    s3Hits = [];
+    const res = await post(`${srv.base}/api/sessions`, {}, await token(url));
+    expect(res.status).toBe(201);
+    const s = (await res.json()) as { sessionId: string; url: string; mode: string };
+    expect(s.mode).toBe("transcode-audio");
+    const pl = await fetch(srv.base + s.url);
+    expect(pl.status).toBe(200);
+    expect(await pl.text()).toContain("#EXTINF");
+    const seek = await post(`${srv.base}/api/sessions/${s.sessionId}/seek`, { position: 1 });
+    expect(seek.status).toBe(200);
+    expect((await fetch(srv.base + ((await seek.json()) as { url: string }).url)).status).toBe(200);
+    expect(s3Hits.length).toBeLessThan(20);
     await fetch(`${srv.base}/api/sessions/${s.sessionId}`, { method: "DELETE" });
   }, 60_000);
 
