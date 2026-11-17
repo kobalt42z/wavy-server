@@ -89,6 +89,43 @@ describe("POST /api/sessions plays every supported sample", () => {
   }
 });
 
+describe("GET /api/peaks", () => {
+  for (const file of ["audio/mp3.mp3", "audio/opus.opus", "audio/wma.wma", "audio/wav_g711.wav", "video/avi_h264_g711.avi"]) {
+    test(`${file} has a waveform`, async () => {
+      const res = await fetch(`${srv.base}/api/peaks?path=${encodeURIComponent(file)}&count=50`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toContain("private");
+      const body = (await res.json()) as { path: string; duration: number; count: number; peaks: number[] };
+      expect(body).toMatchObject({ path: file, count: 50 });
+      expect(body.duration).toBeGreaterThan(1);
+      expect(body.peaks.length).toBe(50);
+      expect(body.peaks.every((p) => p >= 0 && p <= 1)).toBe(true);
+      // The samples are a sine tone: loud almost everywhere.
+      expect(Math.max(...body.peaks)).toBeGreaterThan(0.05);
+    });
+  }
+
+  test("count defaults to 100 and is bounded", async () => {
+    const body = (await (await fetch(`${srv.base}/api/peaks?path=audio/mp3.mp3`)).json()) as { peaks: number[] };
+    expect(body.peaks.length).toBe(100);
+    for (const count of ["0", "1001", "2.5", "x"]) {
+      expect((await fetch(`${srv.base}/api/peaks?path=audio/mp3.mp3&count=${count}`)).status).toBe(400);
+    }
+  });
+
+  test("files without audio, unsupported files and missing tracks are 422", async () => {
+    const noAudio = await fetch(`${srv.base}/api/peaks?path=cctv/raw_h264.264`);
+    expect(noAudio.status).toBe(422);
+    expect(await noAudio.json()).toMatchObject({ error: "no_audio" });
+    const unsupported = await fetch(`${srv.base}/api/peaks?path=other/export.g64x`);
+    expect(unsupported.status).toBe(422);
+    expect(await unsupported.json()).toMatchObject({ error: "unsupported" });
+    const track = await fetch(`${srv.base}/api/peaks?path=audio/mp3.mp3&audioTrack=3`);
+    expect(track.status).toBe(422);
+    expect((await fetch(`${srv.base}/api/peaks?path=audio/nope.mp3`)).status).toBe(404);
+  });
+});
+
 describe("errors", () => {
   test("unsupported files return 422 with a reason", async () => {
     for (const file of ["other/export.g64x", "other/project.prproj", "other/peaks.pkf", "other/driver.sys", "other/notes.txt", "other/corrupt.mp4"]) {

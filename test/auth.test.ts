@@ -245,6 +245,15 @@ describe("other endpoints that take a path", () => {
     expect((await fetch(`${srv.base}/api/probe?path=cases/13/secret.mp4`, { headers: bearer(t) })).status).toBe(403);
   });
 
+  test("peaks need a token covering the path, and default to the token's file", async () => {
+    expect((await fetch(`${srv.base}/api/peaks?path=cases/12/clip.mp4`)).status).toBe(401);
+    const t = await token({ path: "cases/12/clip.mp4" });
+    expect((await fetch(`${srv.base}/api/peaks?path=cases/12/clip.mp4&count=10`, { headers: bearer(t) })).status).toBe(200);
+    expect((await fetch(`${srv.base}/api/peaks?path=cases/13/secret.mp4`, { headers: bearer(t) })).status).toBe(403);
+    const implicit = await fetch(`${srv.base}/api/peaks?count=10`, { headers: bearer(t) });
+    expect(await implicit.json()).toMatchObject({ path: "cases/12/clip.mp4", count: 10 });
+  });
+
   test("/api/files needs a token covering the path", async () => {
     expect((await fetch(`${srv.base}/api/files/cases/12/clip.mp4`)).status).toBe(401);
     const t = await token({ path: "cases/12/" });

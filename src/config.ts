@@ -33,6 +33,12 @@ export interface Config {
   audioBitrate: string;
   /** Seconds sent in Retry-After when the pod is full. */
   retryAfterSec: number;
+  /** Waveform peaks (GET /api/peaks): FFmpeg decodes running at once per pod. More get 503. */
+  peaksConcurrency: number;
+  /** Files with more audio than this (seconds) get no peaks. */
+  peaksMaxDurationSec: number;
+  /** A peaks decode that runs longer than this is killed. */
+  peaksTimeoutMs: number;
   /** Optional path to the playback rules JSON (defaults to config/playback-rules.json). */
   rulesPath?: string;
   /** Origins allowed to call the API from a browser ("*" or a comma-separated list). */
@@ -134,6 +140,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     x264Crf: int("X264_CRF", 23, 0),
     audioBitrate: str("AUDIO_BITRATE", "160k"),
     retryAfterSec: int("RETRY_AFTER_SEC", 5, 1),
+    peaksConcurrency: int("PEAKS_CONCURRENCY", 2, 0),
+    peaksMaxDurationSec: int("PEAKS_MAX_DURATION_SEC", 2 * 3600, 1),
+    peaksTimeoutMs: int("PEAKS_TIMEOUT_MS", 60_000, 1),
     rulesPath: env.PLAYBACK_RULES || undefined,
     corsOrigins: str("CORS_ORIGINS", "*").split(",").map((o) => o.trim()).filter(Boolean),
     mediaPathPrefixes: list(env.MEDIA_PATH_PREFIXES),
