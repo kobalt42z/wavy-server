@@ -10,6 +10,7 @@ import { log } from "./log.ts";
 import { resolveMediaPath, stripRootPrefix, type MediaFile } from "./media-path.ts";
 import { isRemoteUrl, openRemote, redactUrl, remoteInputArgs, serveRemote } from "./remote.ts";
 import type { Metrics } from "./metrics.ts";
+import { computePeaks } from "./peaks.ts";
 import { PlaybackAnalyzer, unsupportedError } from "./playback.ts";
 import type { PlaybackRules } from "./rules.ts";
 import type { Session, SessionManager } from "./sessions.ts";
@@ -22,6 +23,8 @@ export interface AppDeps {
 }
 
 const FILES_PREFIX = "/api/files/";
+/** How long a waveform request waits for a free decode slot before a 503. */
+const PEAKS_QUEUE_WAIT_MS = 15_000;
 /** Path segment of a direct session's file. Can't clash with SEGMENT_NAME or the playlist. */
 const SESSION_FILE_NAME = "file";
 
@@ -65,6 +68,7 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
   // session URLs are their own credential.
   app.use("/api/*", authenticate);
   app.use("/api/probe", auth.requireGrant);
+  app.use("/api/peaks", auth.requireGrant);
   app.on("POST", "/api/sessions", auth.requireGrant);
   app.use(`${FILES_PREFIX}*`, auth.requireGrant);
 
@@ -113,6 +117,70 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
     const file = await openFile(c, requestedPath(c, c.req.query("path")));
     const analysis = await analyzer.analyze(file);
     return c.json(analyzer.toResponse(file, analysis));
+  });
+
+  // Waveform for audio players: the loudest sample in each of `count` equal slices.
+  const peaksCache = new Map<string, { duration: number; peaks: number[] }>();
+  let peaksRunning = 0;
+  app.get("/api/peaks", async (c) => {
+    const count = queryInt(c.req.query("count"), "count", 100, 1, 1000);
+    const audioTrack = queryInt(c.req.query("audioTrack"), "audioTrack", 0, 0, 1000);
+    const file = await openFile(c, requestedPath(c, c.req.query("path")));
+    const analysis = await analyzer.analyze(file);
+    if (analysis.decision.mode === "unsupported" || !analysis.probe) throw unsupportedError(analysis.decision.reason);
+    const probe = analysis.probe;
+    if (!probe.audio[audioTrack]) {
+      throw new ApiError(422, "no_audio", probe.audio.length ? `The file has no audio track ${audioTrack}.` : "The file has no audio.");
+    }
+    if ((probe.duration ?? 0) > config.peaksMaxDurationSec) {
+      throw new ApiError(422, "too_long", `Waveforms are only made for files up to ${config.peaksMaxDurationSec} seconds long.`);
+    }
+
+    const key = `${file.remote ? file.relPath : file.absPath}\0${file.size}\0${file.mtimeMs}\0${file.etag ?? ""}\0${audioTrack}\0${count}`;
+    let result = peaksCache.get(key);
+    if (result) {
+      peaksCache.delete(key);
+      peaksCache.set(key, result);
+    } else {
+      // A page of voice messages asks for all its waveforms at once: wait for a free slot
+      // for a while before answering busy.
+      const deadline = Date.now() + PEAKS_QUEUE_WAIT_MS;
+      while (peaksRunning >= config.peaksConcurrency) {
+        if (Date.now() >= deadline || config.peaksConcurrency === 0) {
+          throw new ApiError(503, "busy", "The server is busy making other waveforms. Try again shortly.", {
+            "Retry-After": String(config.retryAfterSec),
+          });
+        }
+        await Bun.sleep(50);
+      }
+      peaksRunning++;
+      try {
+        result = await computePeaks({
+          ffmpegPath: config.ffmpegPath,
+          input: file.absPath,
+          inputProtocolArgs: file.remote ? remoteInputArgs(config.remote, file.absPath) : undefined,
+          probe,
+          audioTrack,
+          count,
+          timeoutMs: config.peaksTimeoutMs,
+        });
+      } catch (err) {
+        const reason = file.absPath === file.relPath ? String(err) : String(err).split(file.absPath).join(file.relPath);
+        log("warn", "peaks_failed", { path: redactUrl(file.relPath), error: reason });
+        throw new ApiError(502, "ffmpeg_failed", "FFmpeg could not read the audio of this file.");
+      } finally {
+        peaksRunning--;
+      }
+      peaksCache.set(key, result);
+      if (peaksCache.size > 500) peaksCache.delete(peaksCache.keys().next().value!);
+    }
+    c.header("Cache-Control", "private, max-age=3600");
+    return c.json({
+      path: file.relPath,
+      duration: probe.duration ?? result.duration,
+      count,
+      peaks: result.peaks,
+    });
   });
 
   app.post("/api/sessions", async (c) => {
@@ -270,6 +338,13 @@ async function readJson(c: Context): Promise<Record<string, unknown>> {
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) throw badRequest("The request body must be a JSON object.");
   return body as Record<string, unknown>;
+}
+
+function queryInt(raw: string | undefined, field: string, def: number, min: number, max: number): number {
+  if (raw === undefined || raw === "") return def;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) throw badRequest(`${field} must be a whole number from ${min} to ${max}.`);
+  return n;
 }
 
 function optionalNumber(v: unknown, field: string, min: number): number | undefined {

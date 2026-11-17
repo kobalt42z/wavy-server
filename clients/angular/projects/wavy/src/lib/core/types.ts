@@ -52,3 +52,40 @@ export interface StreamError {
   /** The underlying error or hls.js error data, when there is one. */
   cause?: unknown;
 }
+
+/** `GET /api/probe` response. Mirrors `ProbeResponse` in the server's src/playback.ts. */
+export interface ProbeResponse {
+  path: string;
+  mode: StreamMode;
+  reason: string;
+  duration: number | null;
+  container: string | null;
+  size: number;
+  video: { codec: string; width: number | null; height: number | null; fps: number | null; pixFmt: string | null } | null;
+  /** Audio tracks; `track` is the `audioTrack` to pass when starting a session. */
+  audio: { track: number; codec: string; channels: number | null; lang: string | null }[];
+  subtitles: { codec: string; lang: string | null }[];
+  plan: { video: string; audio: string };
+}
+
+/** `POST /api/sessions` response. */
+export interface SessionResponse {
+  sessionId: string;
+  mode: StreamMode;
+  /** Direct file URL, or HLS playlist URL. Relative to the service. */
+  url: string;
+  start: number;
+  duration: number | null;
+  reason: string;
+}
+
+/** `GET /api/peaks` response: `count` values from 0 to 1. */
+export interface PeaksResponse {
+  path: string;
+  duration: number | null;
+  count: number;
+  peaks: number[];
+}
+
+/** What a WavyPlayer is doing. */
+export type PlayerState = 'idle' | 'probing' | 'starting' | 'playing' | 'seeking' | 'error';

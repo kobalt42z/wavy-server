@@ -1,0 +1,21 @@
+{
+  "name": "@wavy/angular",
+  "version": "0.3.0",
+  "description": "Angular video and voice-message audio players for the wavy playback service.",
+  "keywords": ["angular", "video", "audio", "hls", "waveform", "wavy"],
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kobalt42z/wavy-server.git",
+    "directory": "clients/angular/projects/wavy"
+  },
+  "peerDependencies": {
+    "@angular/common": "^20.0.0 || ^21.0.0 || ^22.0.0",
+    "@angular/core": "^20.0.0 || ^21.0.0 || ^22.0.0",
+    "hls.js": "^1.5.0"
+  },
+  "dependencies": {
+    "tslib": "^2.3.0"
+  },
+  "sideEffects": false
+}
