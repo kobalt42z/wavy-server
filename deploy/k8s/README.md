@@ -96,7 +96,9 @@ entry using `behavior: replace`.
   cookie instead and routes on it. Envoy reaches the pods directly, so the Service's
   `ClientIP` affinity doesn't apply. The HTTPProxy raises the response timeout to
   120 s (Contour's default of 15 s is the same as the first playlist's wait) and
-  retries 503 on another pod.
+  retries only connections that never opened. Envoy's cookie is a hash key, not a
+  pod name, so it never moves to another pod: a 503 is not retried there (see the
+  note below).
 - On the same origin as the web app (wavy under a path of its host), the cookie comes
   back on its own. On another origin, set `CORS_ORIGINS` to the web app's origin in
   your overlay: with a list of origins the service answers
@@ -106,8 +108,12 @@ entry using `behavior: replace`.
   Angular directive.
 - If a session is lost anyway (its pod restarted, or a request reached another pod),
   `WavyPlayer` starts a new one at the same position.
-- A pod at its transcode cap returns `503`. The ingress retries that request on
-  another pod (up to 3 tries) and moves the cookie there.
+- A pod at its transcode cap returns `503`. ingress-nginx retries that request on
+  another pod (up to 3 tries) and moves the cookie there. Contour can't: its cookie
+  keeps hashing the viewer to the same pod, so the viewer gets the 503 (with
+  `Retry-After`) until that pod has room. Leave headroom in `MAX_TRANSCODES` and the
+  replica count. Changing the pod count also reassigns some Contour cookies to
+  other pods; those viewers' sessions return 404 and `WavyPlayer` starts a new one.
 - Scale-down is slow (one pod per 5 minutes after 10 quiet minutes) because a
   removed pod ends its sessions. The player recovers by starting a new session.
 

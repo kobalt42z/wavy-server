@@ -30,12 +30,14 @@ spec:
         response: 120s
         idle: 5m
       retryPolicy:
-        # A pod at its transcode cap answers 503 before creating anything, and a
-        # connection that never opened (a pod that just went away, before its endpoint
-        # is removed) sent nothing, so both are safe to retry on another pod.
+        # Only a connection that never opened (a pod that just went away, before its
+        # endpoint is removed) is retried: it sent nothing, so another pod can take it.
+        #
+        # 503 is deliberately not retried. Unlike ingress-nginx, Envoy's cookie is only a
+        # hash key: it never moves to the pod that answered. A retried 503 lands on the
+        # same full pod again, or creates a session on another pod that the viewer's
+        # next request (hashed back to the first pod) can't reach. The client gets
+        # the 503 with its Retry-After instead.
         count: 3
         retryOn:
-          - retriable-status-codes
           - connect-failure
-        retriableStatusCodes:
-          - 503
