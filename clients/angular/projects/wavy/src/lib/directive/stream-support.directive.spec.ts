@@ -1,8 +1,8 @@
-import { Component, signal } from '@angular/core';
+import { Component, provideZonelessChangeDetection, signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { HLS_LOADER, HlsConstructor } from './hls-loader';
+import { HLS_LOADER, HlsConstructor } from '../core/hls-loader';
 import { StreamSupportDirective } from './stream-support.directive';
-import { StreamEngine, StreamError, StreamInput } from './types';
+import { StreamEngine, StreamError, StreamInput } from '../core/types';
 
 /** Records what the directive does with hls.js. */
 class FakeHls {
@@ -81,7 +81,9 @@ describe('StreamSupportDirective', () => {
     );
     loadHls = vi.fn(() => Promise.resolve(FakeHls as unknown as HlsConstructor));
 
-    TestBed.configureTestingModule({ providers: [{ provide: HLS_LOADER, useValue: loadHls }] });
+    TestBed.configureTestingModule({
+      providers: [provideZonelessChangeDetection(), { provide: HLS_LOADER, useValue: loadHls }],
+    });
     fixture = TestBed.createComponent(Host);
     host = fixture.componentInstance;
     video = fixture.nativeElement.querySelector('video');

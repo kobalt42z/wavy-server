@@ -13,8 +13,8 @@ import {
 import { isPlatformBrowser } from '@angular/common';
 import type Hls from 'hls.js';
 import type { HlsConfig } from 'hls.js';
-import { HLS_LOADER } from './hls-loader';
-import { PlaybackStream, StreamEngine, StreamError, StreamInput } from './types';
+import { HLS_LOADER } from '../core/hls-loader';
+import { PlaybackStream, StreamEngine, StreamError, StreamInput } from '../core/types';
 
 const HLS_MIME = 'application/vnd.apple.mpegurl';
 
@@ -56,6 +56,13 @@ export class StreamSupportDirective {
   readonly streamUnsupported = output<string>();
   /** Emits once the media metadata has loaded, with the player in use. */
   readonly streamReady = output<StreamEngine>();
+  /**
+   * Emits the position (seconds in the source file) when a stream that was playing stops
+   * loading: usually its session is gone (a pod restart, or a 404 from a pod that doesn't
+   * hold it). Start a new session at that position and pass it in. `<wavy-video>` and
+   * `WavyPlayer` do this for you.
+   */
+  readonly streamLost = output<number>();
 
   /** The player attached right now, or null. */
   readonly engine = signal<StreamEngine | null>(null);
@@ -158,7 +165,11 @@ export class StreamSupportDirective {
   private playNative(url: string, engine: StreamEngine): () => void {
     const onError = () => {
       const err = this.media.error;
-      this.fail({ kind: 'media', message: mediaErrorMessage(err), cause: err });
+      // 2 = network, 4 = what a 404 looks like; after playback started that is a lost session.
+      const lost = (err?.code === 2 || err?.code === 4) && this.media.currentTime > 0;
+      const position = this.position();
+      this.fail({ kind: lost ? 'network' : 'media', message: mediaErrorMessage(err), cause: err });
+      if (lost) this.streamLost.emit(position);
     };
     this.media.addEventListener('error', onError);
     this.engine.set(engine);
@@ -181,6 +192,7 @@ export class StreamSupportDirective {
         return;
       }
       const network = data.type === HlsClass.ErrorTypes.NETWORK_ERROR;
+      const position = this.position();
       this.fail({
         kind: network ? 'network' : 'media',
         message: network ? 'The stream could not be loaded.' : 'The stream could not be played.',
@@ -188,6 +200,7 @@ export class StreamSupportDirective {
       });
       hls.destroy();
       this.engine.set(null);
+      if (network) this.streamLost.emit(position);
     });
     this.engine.set('hls.js');
     hls.attachMedia(this.media as HTMLVideoElement);

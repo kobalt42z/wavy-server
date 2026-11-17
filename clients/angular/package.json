@@ -1,29 +1,34 @@
 {
   "name": "wavy-angular",
   "version": "0.0.0",
+  "private": true,
   "scripts": {
     "ng": "ng",
-    "build": "ng build stream-support",
-    "test": "ng test stream-support --watch=false"
+    "build": "ng build wavy",
+    "test": "ng test wavy --watch=false",
+    "demo": "ng serve demo",
+    "build:demo": "ng build demo",
+    "check:packaged": "ng build wavy && ng build demo --configuration packaged",
+    "pack": "ng build wavy && cd dist/wavy && npm pack",
+    "use-angular": "node scripts/use-angular.mjs"
   },
-  "private": true,
   "dependencies": {
-    "@angular/common": "^21.2.0",
-    "@angular/compiler": "^21.2.0",
-    "@angular/core": "^21.2.0",
-    "@angular/platform-browser": "^21.2.0",
+    "@angular/common": "~20.3.0",
+    "@angular/compiler": "~20.3.0",
+    "@angular/core": "~20.3.0",
+    "@angular/platform-browser": "~20.3.0",
+    "hls.js": "^1.6.0",
     "rxjs": "~7.8.0",
-    "tslib": "^2.3.0",
-    "hls.js": "^1.7.3"
+    "tslib": "^2.3.0"
   },
   "devDependencies": {
-    "@angular/build": "^21.2.27",
-    "@angular/cli": "^21.2.27",
-    "@angular/compiler-cli": "^21.2.0",
-    "jsdom": "^28.0.0",
-    "ng-packagr": "^21.2.0",
+    "@angular/build": "~20.3.0",
+    "@angular/cli": "~20.3.0",
+    "@angular/compiler-cli": "~20.3.0",
+    "jsdom": "^26.1.0",
+    "ng-packagr": "~20.3.0",
     "prettier": "^3.8.1",
     "typescript": "~5.9.2",
-    "vitest": "^4.0.8"
+    "vitest": "^3.2.4"
   }
 }

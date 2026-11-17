@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../../out-tsc/app",
+    "types": [],
+    "paths": {
+      "@wavy/angular": ["../wavy/src/public-api.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

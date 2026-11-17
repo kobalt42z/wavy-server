@@ -13,8 +13,8 @@
     "experimentalDecorators": true,
     "importHelpers": true,
     "paths": {
-      "@wavy/stream-support": [
-        "./dist/stream-support"
+      "@wavy/angular": [
+        "./dist/wavy"
       ]
     },
     "target": "ES2022",
@@ -29,10 +29,13 @@
   "files": [],
   "references": [
     {
-      "path": "./projects/stream-support/tsconfig.lib.json"
+      "path": "./projects/wavy/tsconfig.lib.json"
     },
     {
-      "path": "./projects/stream-support/tsconfig.spec.json"
+      "path": "./projects/wavy/tsconfig.spec.json"
+    },
+    {
+      "path": "./projects/demo/tsconfig.app.json"
     }
   ]
 }
