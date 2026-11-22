@@ -11,7 +11,7 @@ ARG TINI_VERSION=v0.19.0
 
 # Install production dependencies with the Debian Bun image; only the bun binary and
 # node_modules are kept (Bun needs nothing but glibc).
-FROM oven/bun:1.4.2-slim@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61 AS deps
+FROM oven/bun:1.4.5-slim@sha256:b780593f3e10918cbdaec3d5a08d52224b9198069a65eb47812085c2ec007643 AS deps
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production \
