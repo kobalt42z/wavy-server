@@ -33,7 +33,7 @@ map $origin_host $origin_allowed {
 }
 
 server {
-    listen 8080;
+    listen 8080 default_server;
     server_tokens off;
     resolver ${NGINX_LOCAL_RESOLVERS} valid=30s ipv6=off;
     resolver_timeout 5s;

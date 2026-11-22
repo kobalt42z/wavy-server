@@ -25,7 +25,7 @@ export interface RemoteConfig {
   caFile: string;
   customCa?: boolean;
   /**
-   * Base URL of the slice cache (deploy/k8s/components/s3-cache), e.g.
+   * Base URL of the slice cache (deploy/cache), e.g.
    * "http://wavy-cache:8080". Empty = read remote files straight from the origin.
    */
   cacheUrl?: string;

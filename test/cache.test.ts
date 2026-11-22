@@ -1,5 +1,5 @@
 /**
- * The S3 slice cache (deploy/k8s/components/s3-cache): the real nginx config in front
+ * The S3 slice cache (deploy/cache): the real nginx config in front
  * of an S3 stand-in, with wavy reading remote files through it (REMOTE_CACHE_URL).
  * Needs nginx with the slice module on the PATH; skipped without it.
  */
@@ -12,7 +12,7 @@ import { cacheUrlFor, type RemoteConfig } from "../src/remote.ts";
 import { writeOdmlAvi } from "./helpers/odml-avi.ts";
 import { postJson, samplesDir, startServer, type TestServer } from "./helpers/server.ts";
 
-const TEMPLATE = join(import.meta.dir, "../deploy/k8s/components/s3-cache/wavy-cache.conf.template");
+const TEMPLATE = join(import.meta.dir, "../deploy/cache/wavy-cache.conf.template");
 const hasNginx = Bun.which("nginx") !== null && Bun.spawnSync(["nginx", "-V"]).stderr.toString().includes("http_slice_module");
 
 let samples: string;
@@ -47,7 +47,7 @@ async function startNginx(dir: string, port: number, hostsRegex: string) {
     WAVY_CACHE_HOSTS: hostsRegex,
     WAVY_CACHE_CA_FILE: "/etc/ssl/certs/ca-certificates.crt",
     NGINX_LOCAL_RESOLVERS: "127.0.0.1",
-  }).replace("listen 8080;", `listen 127.0.0.1:${port};`);
+  }).replace("listen 8080 default_server;", `listen 127.0.0.1:${port} default_server;`);
   writeFileSync(join(dir, "site.conf"), site);
   writeFileSync(
     join(dir, "nginx.conf"),
@@ -138,6 +138,20 @@ afterAll(async () => {
   await nginx?.exited;
   await s3?.stop(true);
   for (const d of [media, extra, nginxDir]) if (d) rmSync(d, { recursive: true, force: true });
+});
+
+test("deploy/cache/wavy-cache.yaml embeds the same nginx config, and its cap stays under the disk", () => {
+  const docs = Bun.YAML.parse(readFileSync(join(import.meta.dir, "../deploy/cache/wavy-cache.yaml"), "utf8")) as Record<string, any>[];
+  const config = docs.find((d) => d.kind === "ConfigMap");
+  expect(config?.data?.["wavy-cache.conf.template"]).toBe(readFileSync(TEMPLATE, "utf8"));
+  const gib = (q: string) => Number(/^(\d+)/.exec(q)![1]);
+  const pvc = docs.find((d) => d.kind === "PersistentVolumeClaim")!;
+  const env = Object.fromEntries(
+    docs.find((d) => d.kind === "Deployment")!.spec.template.spec.containers[0].env.map((e: { name: string; value: string }) => [e.name, e.value]),
+  );
+  expect(gib(env.WAVY_CACHE_MAX_SIZE)).toBeLessThanOrEqual(gib(pvc.spec.resources.requests.storage) * 0.95);
+  const policy = docs.find((d) => d.kind === "NetworkPolicy")!;
+  expect(policy.spec.ingress[0].from).toEqual([{ podSelector: { matchLabels: { "app.kubernetes.io/name": "wavy-server" } } }]);
 });
 
 describe.skipIf(!hasNginx)("S3 slice cache (REMOTE_CACHE_URL)", () => {

@@ -135,8 +135,9 @@ browser's Range requests passed on.
 
 Over S3 every seek is a new HTTP request, so files that make FFmpeg jump around (AVI
 indexes, an MP4 `moov` at the end, non-interleaved files) are slow to open and to seek,
-and every view downloads the same bytes again. `deploy/k8s/components/s3-cache` adds a
-shared nginx cache in front of S3, and `REMOTE_CACHE_URL` points wavy at it:
+and every view downloads the same bytes again. `deploy/cache` is a shared nginx cache
+(stock nginx image + one config file, plain Kubernetes YAML) in front of S3, and
+`REMOTE_CACHE_URL` points wavy at it. Deploy guide: [deploy/cache/README.md](deploy/cache/README.md).
 
 ```
 FFmpeg / direct play ──> wavy-cache (nginx, 100 Gi volume) ──> S3
