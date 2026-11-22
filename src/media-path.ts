@@ -13,6 +13,11 @@ export interface MediaFile {
   mtimeMs: number;
   /** An http(s) source (src/remote.ts): relPath is the URL without its query, absPath the full URL. */
   remote?: boolean;
+  /**
+   * For a remote file read through REMOTE_CACHE_URL: the cache URL to read from.
+   * absPath stays the original URL (tokens grant that); read with readUrlOf().
+   */
+  cacheUrl?: string;
   etag?: string;
 }
 

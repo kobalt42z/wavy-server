@@ -121,6 +121,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     throw new Error("AUTH_MODE=jwt needs the main server's public keys: set JWT_JWKS_FILE, JWT_JWKS or JWT_JWKS_URL");
   }
   if (jwksUrl && !/^https?:\/\//.test(jwksUrl)) throw new Error(`JWT_JWKS_URL must be an http(s) URL (got "${jwksUrl}")`);
+  const cacheUrl = (env.REMOTE_CACHE_URL ?? "").trim().replace(/\/+$/, "");
+  if (cacheUrl && !/^https?:\/\/[^/?#]+$/.test(cacheUrl)) {
+    throw new Error(`REMOTE_CACHE_URL must be an http(s) origin like http://wavy-cache:8080 (got "${cacheUrl}")`);
+  }
 
   return {
     port: int("PORT", 8080, 0),
@@ -152,6 +156,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       timeoutMs: int("REMOTE_TIMEOUT_MS", 15_000, 1),
       caFile: str("REMOTE_CA_FILE", DEFAULT_CA_FILE),
       customCa: Boolean(env.REMOTE_CA_FILE),
+      cacheUrl: cacheUrl || undefined,
+      cacheTimeoutMs: int("REMOTE_CACHE_TIMEOUT_MS", 5_000, 1),
     },
     auth: {
       mode: authMode,

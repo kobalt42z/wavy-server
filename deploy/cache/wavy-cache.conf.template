@@ -1,0 +1,99 @@
+# wavy-cache: a read-through slice cache in front of S3 (or any range-capable
+# HTTP origin). Wavy sends remote media reads here instead of to S3:
+#
+#   http://wavy-cache:8080/<scheme>/<host[:port]>/<version>/<path>?<presigned query>
+#
+# <version> is a hash of the object's ETag that wavy got from the origin when it
+# checked the link, so an overwritten object gets new slices. It's dropped before
+# the request goes to the origin.
+#
+# nginx splits every file into fixed slices, fetches only the slices that are
+# read, and keeps them on disk. A seek inside a cached slice costs nothing, so
+# file layouts that make FFmpeg jump around (AVI indexes, MP4 moov at the end)
+# stop costing one S3 request per jump, and repeat views come from disk.
+#
+# Rendered by the nginx image's entrypoint (envsubst of ${VARS}) into
+# /etc/nginx/conf.d. Settings:
+#   WAVY_CACHE_HOSTS     regex of origin hosts it may fetch from (anything else is 403)
+#   WAVY_CACHE_MAX_SIZE  disk cap, kept below the volume size (nginx can overshoot briefly)
+#   WAVY_CACHE_INACTIVE  slices not read for this long are dropped
+#   WAVY_CACHE_SLICE     slice size
+#   WAVY_CACHE_DIR       cache directory (the PersistentVolume)
+#   NGINX_LOCAL_RESOLVERS  set by the image (NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1)
+
+proxy_cache_path ${WAVY_CACHE_DIR} levels=1:2 keys_zone=wavy:32m
+                 max_size=${WAVY_CACHE_MAX_SIZE} inactive=${WAVY_CACHE_INACTIVE}
+                 use_temp_path=off;
+
+# Origin hosts the cache may fetch from. Wavy checks REMOTE_ALLOWED_HOSTS before it
+# builds a cache URL; this is the same list again, so the cache is never an open proxy.
+map $origin_host $origin_allowed {
+    default 0;
+    "~${WAVY_CACHE_HOSTS}" 1;
+}
+
+server {
+    listen 8080 default_server;
+    server_tokens off;
+    resolver ${NGINX_LOCAL_RESOLVERS} valid=30s ipv6=off;
+    resolver_timeout 5s;
+
+    location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+    }
+
+    location ~ ^/(?<origin_scheme>https?)/(?<origin_host>(?<origin_name>[A-Za-z0-9.-]+)(?::[0-9]+)?)/(?<object_version>[a-z0-9]+)(?<origin_path>/.*)$ {
+        if ($origin_allowed = 0) {
+            return 403 "origin host not allowed\n";
+        }
+        limit_except GET { deny all; }
+
+        slice ${WAVY_CACHE_SLICE};
+        proxy_cache wavy;
+        # The key leaves out the query: presigned links carry a new signature each
+        # time, and the same object must hit the same slices. Wavy builds cache URLs
+        # only after the origin accepted that exact link (and its token), and only
+        # wavy pods can reach this service (NetworkPolicy).
+        proxy_cache_key $origin_scheme://$origin_host/$object_version$origin_path$slice_range;
+        proxy_cache_valid 200 206 ${WAVY_CACHE_INACTIVE};
+        proxy_cache_lock on;
+        proxy_cache_lock_timeout 30s;
+        proxy_cache_use_stale error timeout updating;
+        # S3 sends no-cache headers for presigned GETs; the cache decides here.
+        proxy_ignore_headers Cache-Control Expires Set-Cookie Vary X-Accel-Expires;
+        proxy_hide_header Set-Cookie;
+        add_header X-Cache-Status $upstream_cache_status always;
+
+        # $uri is decoded; $request_uri keeps the original encoding the signature covers.
+        set $origin_request_path $origin_path;
+        if ($request_uri ~ ^/https?/[^/]+/[a-z0-9]+(?<raw_path>/[^?]*)) {
+            set $origin_request_path $raw_path;
+        }
+        proxy_pass $origin_scheme://$origin_host$origin_request_path$is_args$args;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        # Presigned URLs sign the Host header; pass the origin's, not ours.
+        proxy_set_header Host $origin_host;
+        proxy_set_header Range $slice_range;
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+
+        proxy_ssl_server_name on;
+        proxy_ssl_name $origin_name;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 4;
+        proxy_ssl_trusted_certificate ${WAVY_CACHE_CA_FILE};
+
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 30s;
+        # Never follow or rewrite redirects; wavy refuses them.
+        proxy_redirect off;
+    }
+
+    location / {
+        return 404;
+    }
+}
