@@ -19,7 +19,7 @@ if ! cmp -s "$repo/config/playback-rules.json" "$here/base/playback-rules.json";
 fi
 
 status=0
-for dir in base overlays/hpa overlays/keda overlays/contour; do
+for dir in base overlays/hpa overlays/keda overlays/contour overlays/s3-cache; do
   echo "• $dir"
   rendered="$(kustomize build "$here/$dir")"
   if ! printf '%s\n' "$rendered" | kubeconform -strict -summary \

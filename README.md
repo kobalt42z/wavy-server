@@ -131,6 +131,35 @@ browser's Range requests passed on.
 - The link must stay valid for the whole session: a seek or a transcode restart opens it
   again. Presign for at least `SESSION_MAX_AGE_MS`, or as long as a viewing can last.
 
+### S3 slice cache
+
+Over S3 every seek is a new HTTP request, so files that make FFmpeg jump around (AVI
+indexes, an MP4 `moov` at the end, non-interleaved files) are slow to open and to seek,
+and every view downloads the same bytes again. `deploy/k8s/components/s3-cache` adds a
+shared nginx cache in front of S3, and `REMOTE_CACHE_URL` points wavy at it:
+
+```
+FFmpeg / direct play ──> wavy-cache (nginx, 100 Gi volume) ──> S3
+   http://wavy-cache:8080/https/<bucket host>/<version>/<key>?<signature>
+```
+
+- nginx's `slice` module splits each object into 4 MB slices and fetches only the
+  slices that are read, with exact ranges. A seek inside a cached slice costs nothing;
+  a second view of a file reads nothing from S3.
+- Slices are keyed by object, not by link: a re-signed link for the same object hits the
+  same slices. `<version>` is a hash of the object's ETag, so an overwritten object gets
+  new slices.
+- Wavy still checks every link against S3 first (its one-byte size GET goes to the
+  origin), so an expired or forged link is refused even when the file is cached.
+- The cache evicts the least recently used slices: it stays under `WAVY_CACHE_MAX_SIZE`
+  (90g) and drops slices nobody read for `WAVY_CACHE_INACTIVE` (24h). Nothing queues
+  or fails when it's full; old slices make room. Keep the cap about 10% under the
+  volume, because nginx evicts in the background and can briefly go over.
+- If the cache is down, wavy reads S3 directly and tries the cache again after 30 s.
+  Running sessions switch on their next seek or restart.
+- Only wavy-server pods may reach the cache (NetworkPolicy), and it only fetches from
+  `WAVY_CACHE_HOSTS`, so it is never an open proxy.
+
 ### Share-root prefixes
 
 `MEDIA_PATH_PREFIXES` lists other spellings of the share root that clients may put in
@@ -189,6 +218,8 @@ Plus the default process metrics, prefixed `wavy_`.
 | `REMOTE_ALLOW_HTTP` | `false` | Also allow plain `http://` URLs (an in-cluster MinIO, for example). |
 | `REMOTE_TIMEOUT_MS` | `15000` | Timeout for opening a remote file and for each stalled read. |
 | `REMOTE_CA_FILE` | `/etc/ssl/certs/ca-certificates.crt` | CA bundle for https sources. Set it for a private CA. |
+| `REMOTE_CACHE_URL` | | Slice cache for remote files, e.g. `http://wavy-cache:8080` ("S3 slice cache" below). Empty reads the origin directly. |
+| `REMOTE_CACHE_TIMEOUT_MS` | `5000` | How long to wait for the cache before reading the origin instead. |
 | `MEDIA_PATH_PREFIXES` | | Other spellings of the share root, stripped from the front of paths. |
 | `FFMPEG_PATH`, `FFPROBE_PATH` | `ffmpeg`, `ffprobe` | Binaries. |
 | `LOG_LEVEL` | | `silent` turns logs off. |

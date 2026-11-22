@@ -11,8 +11,10 @@ deploy/k8s/
   components/keda/              KEDA ScaledObject on the same metric (alternative to hpa)
   components/prometheus-operator/  ServiceMonitor for /metrics
   components/contour/           HTTPProxy with cookie stickiness, replacing the Ingress
+  components/s3-cache/          nginx slice cache for S3 links (Deployment, 100 Gi PVC, NetworkPolicy)
   overlays/hpa, overlays/keda   Example environments (ingress-nginx): copy one per cluster
   overlays/contour              Example environment for a Contour cluster
+  overlays/s3-cache             overlays/hpa plus the S3 slice cache
   validate.sh                   Schema + rule checks (runs in CI)
 ```
 
@@ -48,6 +50,28 @@ deploy/k8s/
    ```
 
 3. Apply: `kubectl apply -k deploy/k8s/overlays/prod`.
+
+## S3 slice cache (components/s3-cache)
+
+For tokens that carry S3 presigned links. Adds one shared nginx pod (`wavy-cache`)
+with a 100 Gi `ReadWriteOnce` volume, a Service and a NetworkPolicy, and sets
+`REMOTE_CACHE_URL=http://wavy-cache:8080` on wavy-server. All wavy-server replicas
+share it. How it works: README "S3 slice cache".
+
+1. Add `../../components/s3-cache` to your overlay's `components` (see `overlays/s3-cache`).
+2. Set the bucket host twice: `REMOTE_ALLOWED_HOSTS` for wavy, and the cache's
+   `WAVY_CACHE_HOSTS` env (a regex on `host[:port]`, e.g.
+   `^evidence\.s3\.eu-west-1\.amazonaws\.com$`).
+3. Optionally set `storageClassName` on the `wavy-cache` PVC (SSD-backed is best).
+
+Sizing: the volume is 100 Gi and nginx's cap `WAVY_CACHE_MAX_SIZE` is `90g`. Raise both
+together and keep the cap at most 95% of the volume (`check-invariants.ts` enforces it).
+Slices nobody read for 24 h are dropped (`WAVY_CACHE_INACTIVE`).
+
+One pod is enough: nginx serves cached slices at disk speed, and when it restarts
+(`Recreate`, because the volume is `ReadWriteOnce`) wavy reads S3 directly until it's back.
+The NetworkPolicy needs a CNI that enforces policies (Calico, Cilium, ...); without one,
+anything in the cluster could read cached slices.
 
 ## How it maps to the spec
 

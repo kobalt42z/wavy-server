@@ -9,7 +9,7 @@ import { ApiError } from "./http/errors.ts";
 import { log } from "./log.ts";
 import type { MediaFile } from "./media-path.ts";
 import type { Metrics } from "./metrics.ts";
-import { remoteInputArgs } from "./remote.ts";
+import { checkCache, readUrlOf, redactRemote, remoteInputArgs } from "./remote.ts";
 import type { ProbeResult } from "./probe.ts";
 
 export type EncoderState = "none" | "running" | "done" | "failed";
@@ -235,9 +235,12 @@ export class SessionManager {
 
   private startEncoder(session: Session): void {
     session.generation += 1;
+    // Remote files are re-resolved on every (re)start: a seek after the cache went
+    // down reads from the origin instead.
+    const input = session.remoteFile ? readUrlOf(session.remoteFile, this.cfg.remote) : session.absPath;
     const args = buildHlsArgs(session.decision, session.probe, {
-      input: session.absPath,
-      inputProtocolArgs: session.remoteFile ? remoteInputArgs(this.cfg.remote, session.absPath) : undefined,
+      input,
+      inputProtocolArgs: session.remoteFile ? remoteInputArgs(this.cfg.remote, input) : undefined,
       outDir: session.dir,
       start: session.start,
       prefix: `g${session.generation}`,
@@ -265,7 +268,8 @@ export class SessionManager {
       session.encoder = "failed";
       const lines = errText.trim().split("\n").slice(-3).join(" | ") || `ffmpeg exited with code ${code}`;
       // A remote URL's signature (the query) stays out of logs and API responses.
-      session.error = session.absPath === session.relPath ? lines : lines.split(session.absPath).join(session.relPath);
+      session.error = session.remoteFile ? redactRemote(lines, session.remoteFile) : lines;
+      if (session.remoteFile?.cacheUrl && input === session.remoteFile.cacheUrl) void checkCache(this.cfg.remote);
       this.metrics.ffmpegFailures.inc({ mode: session.mode, extension: session.extension });
       log("error", "ffmpeg_failed", {
         sessionId: session.id,

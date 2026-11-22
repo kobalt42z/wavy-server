@@ -56,7 +56,7 @@ jobs:
       - name: Server-side dry run
         run: |
           kubectl create namespace wavy
-          for dir in overlays/hpa overlays/keda overlays/contour; do
+          for dir in overlays/hpa overlays/keda overlays/contour overlays/s3-cache; do
             echo "• $dir"
             kubectl kustomize "deploy/k8s/$dir" | kubectl apply --dry-run=server -f -
           done

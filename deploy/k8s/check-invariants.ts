@@ -10,8 +10,9 @@ const errors: string[] = [];
 const fail = (msg: string) => errors.push(msg);
 const find = (kind: string) => docs.filter((d) => d.kind === kind);
 
-const deployments = find("Deployment");
-if (deployments.length !== 1) fail(`expected 1 Deployment, found ${deployments.length}`);
+// The playback service; components/s3-cache adds a second Deployment (wavy-cache).
+const deployments = find("Deployment").filter((d) => d.metadata.name !== "wavy-cache");
+if (deployments.length !== 1) fail(`expected 1 wavy-server Deployment, found ${deployments.length}`);
 
 for (const dep of deployments) {
   const pod = dep.spec.template.spec;
@@ -57,8 +58,45 @@ for (const pv of find("PersistentVolume")) {
   if (pv.spec.csi?.readOnly !== true) fail(`PV ${pv.metadata.name}: csi.readOnly must be true`);
   if (JSON.stringify(pv.spec.accessModes) !== '["ReadOnlyMany"]') fail(`PV ${pv.metadata.name}: must be ReadOnlyMany only`);
 }
-for (const pvc of find("PersistentVolumeClaim")) {
+for (const pvc of find("PersistentVolumeClaim").filter((p) => p.metadata.name !== "wavy-cache")) {
   if (JSON.stringify(pvc.spec.accessModes) !== '["ReadOnlyMany"]') fail(`PVC ${pvc.metadata.name}: must be ReadOnlyMany only`);
+}
+
+// components/s3-cache: the cache stays under its volume, is reachable only from
+// wavy-server, runs locked down, and wavy-server is pointed at it.
+const cache = find("Deployment").find((d) => d.metadata.name === "wavy-cache");
+if (cache) {
+  const toBytes = (q: string) => {
+    const m = /^(\d+(?:\.\d+)?)([kmgt]i?)?$/i.exec(String(q).trim());
+    if (!m) return NaN;
+    const unit = (m[2] ?? "").toLowerCase().replace("i", "");
+    return Number(m[1]) * 1024 ** (["", "k", "m", "g", "t"].indexOf(unit));
+  };
+  const c = cache.spec.template.spec.containers[0];
+  const env = Object.fromEntries((c.env ?? []).map((e: Doc) => [e.name, e.value]));
+  const pvc = find("PersistentVolumeClaim").find((p) => p.metadata.name === "wavy-cache");
+  if (!pvc) fail("wavy-cache: no wavy-cache PersistentVolumeClaim");
+  else {
+    const cap = toBytes(env.WAVY_CACHE_MAX_SIZE);
+    const disk = toBytes(pvc.spec.resources.requests.storage);
+    if (!(cap > 0) || !(cap <= disk * 0.95)) {
+      fail(`wavy-cache: WAVY_CACHE_MAX_SIZE (${env.WAVY_CACHE_MAX_SIZE}) must stay at most 95% of the volume (${pvc.spec.resources.requests.storage})`);
+    }
+  }
+  if (cache.spec.replicas !== 1 || cache.spec.strategy?.type !== "Recreate") fail("wavy-cache: one replica with Recreate (the volume is ReadWriteOnce)");
+  if (!env.WAVY_CACHE_HOSTS || env.WAVY_CACHE_HOSTS === ".*") fail("wavy-cache: WAVY_CACHE_HOSTS must list the bucket hosts");
+  const runAsNonRoot = c.securityContext?.runAsNonRoot ?? cache.spec.template.spec.securityContext?.runAsNonRoot;
+  if (runAsNonRoot !== true || c.securityContext?.readOnlyRootFilesystem !== true) fail("wavy-cache: must run non-root with a read-only root filesystem");
+  for (const res of ["cpu", "memory"]) {
+    if (String(c.resources?.requests?.[res]) !== String(c.resources?.limits?.[res])) fail(`wavy-cache: ${res} request must equal limit`);
+  }
+  const policy = find("NetworkPolicy").find((n) => n.spec?.podSelector?.matchLabels?.["app.kubernetes.io/name"] === "wavy-cache");
+  const from = policy?.spec?.ingress?.flatMap((i: Doc) => i.from ?? []) ?? [];
+  if (!policy || from.length === 0 || !from.every((f: Doc) => f.podSelector?.matchLabels?.["app.kubernetes.io/name"] === "wavy-server" && !f.namespaceSelector)) {
+    fail("wavy-cache: a NetworkPolicy must allow ingress from wavy-server pods only");
+  }
+  const envMap = find("ConfigMap").find((m) => String(m.metadata.name).startsWith("wavy-server-env"));
+  if (!String(envMap?.data?.REMOTE_CACHE_URL ?? "").startsWith("http://wavy-cache:")) fail("wavy-server-env: REMOTE_CACHE_URL must point at wavy-cache");
 }
 if (find("Secret").length > 0) fail("rendered output contains a Secret; credentials must not live in git");
 

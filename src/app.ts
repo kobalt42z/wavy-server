@@ -8,7 +8,7 @@ import { PLAYLIST_NAME, SEGMENT_NAME, segmentContentType } from "./hls.ts";
 import { ApiError, badRequest, notFound } from "./http/errors.ts";
 import { log } from "./log.ts";
 import { resolveMediaPath, stripRootPrefix, type MediaFile } from "./media-path.ts";
-import { isRemoteUrl, openRemote, redactUrl, remoteInputArgs, serveRemote } from "./remote.ts";
+import { isRemoteUrl, openRemote, readUrlOf, redactRemote, redactUrl, remoteInputArgs, serveRemote } from "./remote.ts";
 import type { Metrics } from "./metrics.ts";
 import { computePeaks } from "./peaks.ts";
 import { PlaybackAnalyzer, unsupportedError } from "./playback.ts";
@@ -29,8 +29,13 @@ const PEAKS_QUEUE_WAIT_MS = 15_000;
 const SESSION_FILE_NAME = "file";
 
 export function createApp({ config, rules, metrics, sessions }: AppDeps) {
-  const analyzer = new PlaybackAnalyzer(rules, metrics, config.ffprobePath, 1000, (url) =>
-    remoteInputArgs(config.remote, url),
+  const analyzer = new PlaybackAnalyzer(
+    rules,
+    metrics,
+    config.ffprobePath,
+    1000,
+    (url) => remoteInputArgs(config.remote, url),
+    (file) => readUrlOf(file, config.remote),
   );
   const auth = createAuth(config.auth, config.mediaPathPrefixes);
   const app = new Hono<AppEnv>();
@@ -154,18 +159,19 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
         await Bun.sleep(50);
       }
       peaksRunning++;
+      const input = file.remote ? readUrlOf(file, config.remote) : file.absPath;
       try {
         result = await computePeaks({
           ffmpegPath: config.ffmpegPath,
-          input: file.absPath,
-          inputProtocolArgs: file.remote ? remoteInputArgs(config.remote, file.absPath) : undefined,
+          input,
+          inputProtocolArgs: file.remote ? remoteInputArgs(config.remote, input) : undefined,
           probe,
           audioTrack,
           count,
           timeoutMs: config.peaksTimeoutMs,
         });
       } catch (err) {
-        const reason = file.absPath === file.relPath ? String(err) : String(err).split(file.absPath).join(file.relPath);
+        const reason = redactRemote(String(err), file);
         log("warn", "peaks_failed", { path: redactUrl(file.relPath), error: reason });
         throw new ApiError(502, "ffmpeg_failed", "FFmpeg could not read the audio of this file.");
       } finally {

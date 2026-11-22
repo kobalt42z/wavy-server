@@ -5,6 +5,7 @@ import type { MediaFile } from "./media-path.ts";
 import type { Metrics } from "./metrics.ts";
 import { extensionOf } from "./paths.ts";
 import { probeFile, type ProbeResult } from "./probe.ts";
+import { redactRemote } from "./remote.ts";
 import type { PlaybackRules } from "./rules.ts";
 
 export interface Analysis {
@@ -42,6 +43,8 @@ export class PlaybackAnalyzer {
     private readonly cacheSize = 1000,
     /** ffprobe/FFmpeg input options for remote (http) files. */
     private readonly remoteInputArgs: (url: string) => string[] = () => [],
+    /** URL to read a remote file from (the cache, or the origin when the cache is down). */
+    private readonly readUrl: (file: MediaFile) => string = (file) => file.absPath,
   ) {}
 
   /** Extension as a metrics label: known extensions as-is, anything else as "other". */
@@ -68,10 +71,11 @@ export class PlaybackAnalyzer {
       analysis = { extension, decision: unsupported(extReason) };
     } else {
       const stopTimer = this.metrics.probeDuration.startTimer();
-      const outcome = await probeFile(file.absPath, this.rules, {
+      const input = file.remote ? this.readUrl(file) : file.absPath;
+      const outcome = await probeFile(input, this.rules, {
         ffprobePath: this.ffprobePath,
         extension,
-        baseInputArgs: file.remote ? this.remoteInputArgs(file.absPath) : undefined,
+        baseInputArgs: file.remote ? this.remoteInputArgs(input) : undefined,
         remote: file.remote,
       });
       stopTimer();
@@ -130,7 +134,7 @@ export class PlaybackAnalyzer {
 
 /** Keeps a remote URL's signature out of messages and logs. */
 function redact(text: string, file: MediaFile): string {
-  return file.remote ? text.split(file.absPath).join(file.relPath) : text;
+  return redactRemote(text, file);
 }
 
 export function unsupportedError(reason: string): ApiError {
