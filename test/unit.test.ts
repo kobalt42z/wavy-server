@@ -121,6 +121,16 @@ describe("buildHlsArgs", () => {
     expect(after(args, "-hls_fmp4_init_filename")).toBe("g1_init.mp4");
     expect(args.at(-1)).toBe("/tmp/sessions/abc/index.m3u8");
     expect(after(args, "-i")).toBe("/media/a b.mov");
+    expect(after(args, "-bsf:a")).toBe("aac_adtstoasc");
+  });
+
+  test("copied AAC gets the ADTS filter only for fMP4 segments", () => {
+    const p = probe({}, "aac", { container: "mpegts" });
+    const d = decide(p, "ts", rules);
+    expect(after(buildHlsArgs(d, p, opts), "-bsf:a")).toBe("aac_adtstoasc");
+    expect(buildHlsArgs(d, p, { ...opts, segmentType: "mpegts" })).not.toContain("-bsf:a");
+    const enc = probe({}, "ac3");
+    expect(buildHlsArgs(decide(enc, "mts", rules), enc, opts)).not.toContain("-bsf:a");
   });
 
   test("partial transcode copies video and encodes audio to stereo AAC", () => {

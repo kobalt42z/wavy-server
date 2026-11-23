@@ -74,6 +74,11 @@ export function buildHlsArgs(decision: Decision, probe: ProbeResult, o: HlsOptio
 
   if (audio.action === "copy") {
     args.push("-c:a", "copy");
+    // AAC from MPEG-TS (and raw .aac) carries ADTS headers, which fMP4 can't hold. The
+    // HLS muxer doesn't insert this filter on its own: without it FFmpeg stops after the
+    // first fragment and the init segment has no AudioSpecificConfig, so the browser
+    // rejects the stream. The filter leaves AAC that has no ADTS headers untouched.
+    if (o.segmentType === "fmp4" && audio.codec === "aac") args.push("-bsf:a", "aac_adtstoasc");
   } else if (audio.action === "encode") {
     args.push("-c:a", "aac", "-b:a", o.audioBitrate, "-ac", "2", "-ar", "48000");
   }
