@@ -4,13 +4,14 @@ import { mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config } from "./config.ts";
 import type { Decision, PlaybackMode } from "./decide.ts";
+import { AviIndexer } from "./avi-index.ts";
 import { buildHlsArgs, parseProgressSpeed, PLAYLIST_NAME } from "./hls.ts";
 import { ApiError } from "./http/errors.ts";
 import { log } from "./log.ts";
 import type { MediaFile } from "./media-path.ts";
 import type { Metrics } from "./metrics.ts";
 import { checkCache, readUrlOf, redactRemote, remoteInputArgs } from "./remote.ts";
-import type { ProbeResult } from "./probe.ts";
+import { REMOTE_AVI_ARGS, type ProbeResult } from "./probe.ts";
 
 export type EncoderState = "none" | "running" | "done" | "failed";
 export type EndCause = "deleted" | "idle" | "expired" | "shutdown";
@@ -41,7 +42,12 @@ export interface Session {
   /** Last FFmpeg error lines, when the encoder failed. */
   error?: string;
   proc?: Subprocess<"ignore", "pipe", "pipe">;
+  /** Remote AVI read through the rebuilt index (src/avi-index.ts): FFmpeg's input. */
+  aviInput?: { url: string; id: string };
 }
+
+/** A seek in a remote AVI waits this long for its index before falling back to a scan. */
+export const AVI_INDEX_WAIT_MS = 20_000;
 
 export interface CreateSessionInput {
   ownerId: string | null;
@@ -63,6 +69,7 @@ const isHls = (s: { mode: PlaybackMode }) => s.mode !== "direct" && s.mode !== "
  */
 export class SessionManager {
   private readonly sessions = new Map<string, Session>();
+  private readonly avi: AviIndexer;
   private reaper?: ReturnType<typeof setInterval>;
 
   constructor(
@@ -70,6 +77,7 @@ export class SessionManager {
     private readonly metrics: Metrics,
     private readonly now: () => number = Date.now,
   ) {
+    this.avi = new AviIndexer(cfg.remote);
     metrics.transcodeCapacity.set(cfg.maxTranscodes);
     this.refreshGauges();
   }
@@ -139,6 +147,8 @@ export class SessionManager {
     if (mode !== "direct") {
       try {
         await mkdir(session.dir, { recursive: true });
+        await this.prepareAvi(session);
+        if (!this.sessions.has(id)) throw new ApiError(410, "session_ended", "The session ended while it was starting.");
         this.startEncoder(session);
       } catch (err) {
         await this.stop(session, "deleted");
@@ -169,12 +179,15 @@ export class SessionManager {
     if (!this.sessions.has(session.id)) return; // stopped while we waited
     session.start = clampStart(position, session.probe.duration);
     session.error = undefined;
+    await this.prepareAvi(session);
+    if (!this.sessions.has(session.id) || session.proc) return; // stopped, or another seek won
     this.startEncoder(session);
     log("info", "session_seek", { sessionId: session.id, path: session.relPath, start: session.start });
   }
 
   async stop(session: Session, cause: EndCause): Promise<void> {
     if (!this.sessions.delete(session.id)) return;
+    this.avi.release(session.aviInput?.id);
     this.refreshGauges();
     this.metrics.sessionsEnded.inc({ cause });
     await this.killEncoder(session);
@@ -205,6 +218,7 @@ export class SessionManager {
   async shutdown(): Promise<void> {
     if (this.reaper) clearInterval(this.reaper);
     await Promise.all(this.list().map((s) => this.stop(s, "shutdown")));
+    this.avi.stop();
   }
 
   /**
@@ -233,12 +247,26 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Remote AVIs (probed with -use_odml 0) seek by reading the file from the start, so
+   * they get an index of their own (src/avi-index.ts). Its build starts with the
+   * session; a start at 0 doesn't wait for it, a seek does (up to AVI_INDEX_WAIT_MS).
+   */
+  private async prepareAvi(session: Session): Promise<void> {
+    if (!session.remoteFile || session.aviInput || !session.probe.inputArgs.includes(REMOTE_AVI_ARGS[0]!)) return;
+    this.avi.warm(session.remoteFile);
+    session.aviInput = (await this.avi.open(session.remoteFile, session.start > 0 ? AVI_INDEX_WAIT_MS : 0)) ?? undefined;
+    if (session.aviInput && !this.sessions.has(session.id)) this.avi.release(session.aviInput.id);
+  }
+
   private startEncoder(session: Session): void {
     session.generation += 1;
     // Remote files are re-resolved on every (re)start: a seek after the cache went
-    // down reads from the origin instead.
-    const input = session.remoteFile ? readUrlOf(session.remoteFile, this.cfg.remote) : session.absPath;
-    const args = buildHlsArgs(session.decision, session.probe, {
+    // down reads from the origin instead. A remote AVI with a rebuilt index is read
+    // from the loopback server, with FFmpeg's normal OpenDML index reading.
+    const input = session.aviInput?.url ?? (session.remoteFile ? readUrlOf(session.remoteFile, this.cfg.remote) : session.absPath);
+    const probe = session.aviInput ? { ...session.probe, inputArgs: withoutArgs(session.probe.inputArgs, REMOTE_AVI_ARGS) } : session.probe;
+    const args = buildHlsArgs(session.decision, probe, {
       input,
       inputProtocolArgs: session.remoteFile ? remoteInputArgs(this.cfg.remote, input) : undefined,
       outDir: session.dir,
@@ -327,6 +355,12 @@ function clampStart(start: number, duration?: number): number {
   if (!Number.isFinite(start) || start <= 0) return 0;
   if (duration && duration > 0) return Math.min(start, Math.max(0, duration - 1));
   return start;
+}
+
+/** `args` without the option/value pair `pair` ([name, value]). */
+function withoutArgs(args: string[], pair: string[]): string[] {
+  const i = args.indexOf(pair[0]!);
+  return i >= 0 && args[i + 1] === pair[1] ? [...args.slice(0, i), ...args.slice(i + 2)] : args;
 }
 
 async function clearDir(dir: string): Promise<void> {

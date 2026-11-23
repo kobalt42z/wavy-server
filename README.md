@@ -124,10 +124,18 @@ browser's Range requests passed on.
 - Wavy reads the size with a one-byte range GET, because presigned URLs aren't valid for
   HEAD. The URL's query (the signature) is never logged or returned; logs and
   responses show origin + path.
-- Remote AVI files are read with `-use_odml 0`. DVR/NVR exports split their OpenDML
-  index into small chunks through the file, and FFmpeg seeks to each one on open: cheap
-  on the share, but one HTTP request per chunk on S3, so a 1-hour 4 GB export timed out
-  the probe. Duration and seeking still work without it.
+- Remote AVI files are read with `-use_odml 0`. DVR/NVR and camera recordings split their
+  OpenDML index into small chunks through the file, and FFmpeg seeks to each one on open:
+  cheap on the share, but one HTTP request per chunk on S3, so a 1-hour 4 GB file timed
+  out the probe.
+- Without that index FFmpeg would seek by reading the file up to the target (gigabytes
+  for a seek late in a long file). So for a playback session wavy reads the index itself,
+  once per file (super index from the header, then every chunk with ~96 parallel range
+  requests: about 4 s for an hour of video at 50 ms per request), merges it into one chunk per stream and
+  hands FFmpeg a virtual copy of the file from a loopback server on 127.0.0.1: the header
+  and merged index from memory, the media bytes from S3 (or the cache). Seeks then jump
+  straight to the right byte. The build starts with the session; a seek waits for it (up
+  to 20 s) instead of scanning. Indexes of the last 16 files are kept in memory.
 - The link must stay valid for the whole session: a seek or a transcode restart opens it
   again. Presign for at least `SESSION_MAX_AGE_MS`, or as long as a viewing can last.
 
