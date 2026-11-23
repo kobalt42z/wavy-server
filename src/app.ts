@@ -8,7 +8,7 @@ import { PLAYLIST_NAME, SEGMENT_NAME, segmentContentType } from "./hls.ts";
 import { ApiError, badRequest, notFound } from "./http/errors.ts";
 import { log } from "./log.ts";
 import { resolveMediaPath, stripRootPrefix, type MediaFile } from "./media-path.ts";
-import { isRemoteUrl, openRemote, readUrlOf, redactRemote, redactUrl, remoteInputArgs, serveRemote } from "./remote.ts";
+import { isRemoteUrl, openRemote, redactRemote, redactUrl, remoteInputArgs, serveRemote } from "./remote.ts";
 import type { Metrics } from "./metrics.ts";
 import { computePeaks } from "./peaks.ts";
 import { PlaybackAnalyzer, unsupportedError } from "./playback.ts";
@@ -35,7 +35,7 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
     config.ffprobePath,
     1000,
     (url) => remoteInputArgs(config.remote, url),
-    (file) => readUrlOf(file, config.remote),
+    sessions.store,
   );
   const auth = createAuth(config.auth, config.mediaPathPrefixes);
   const app = new Hono<AppEnv>();
@@ -159,7 +159,9 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
         await Bun.sleep(50);
       }
       peaksRunning++;
-      const input = file.remote ? readUrlOf(file, config.remote) : file.absPath;
+      // Remote files are read through the byte store (src/byte-store.ts).
+      const handle = file.remote ? sessions.store.open(file) : undefined;
+      const input = handle?.url ?? file.absPath;
       try {
         result = await computePeaks({
           ffmpegPath: config.ffmpegPath,
@@ -175,6 +177,7 @@ export function createApp({ config, rules, metrics, sessions }: AppDeps) {
         log("warn", "peaks_failed", { path: redactUrl(file.relPath), error: reason });
         throw new ApiError(502, "ffmpeg_failed", "FFmpeg could not read the audio of this file.");
       } finally {
+        sessions.store.release(handle?.id);
         peaksRunning--;
       }
       peaksCache.set(key, result);

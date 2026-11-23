@@ -1,6 +1,7 @@
 import { checkExtension, decide, unsupported, type Decision } from "./decide.ts";
 import { ApiError, badRequest } from "./http/errors.ts";
 import { log } from "./log.ts";
+import type { ByteStore } from "./byte-store.ts";
 import type { MediaFile } from "./media-path.ts";
 import type { Metrics } from "./metrics.ts";
 import { extensionOf } from "./paths.ts";
@@ -43,8 +44,8 @@ export class PlaybackAnalyzer {
     private readonly cacheSize = 1000,
     /** ffprobe/FFmpeg input options for remote (http) files. */
     private readonly remoteInputArgs: (url: string) => string[] = () => [],
-    /** URL to read a remote file from (the cache, or the origin when the cache is down). */
-    private readonly readUrl: (file: MediaFile) => string = (file) => file.absPath,
+    /** Remote files are probed through the byte store's loopback URL (src/byte-store.ts). */
+    private readonly store?: Pick<ByteStore, "open" | "release">,
   ) {}
 
   /** Extension as a metrics label: known extensions as-is, anything else as "other". */
@@ -71,14 +72,23 @@ export class PlaybackAnalyzer {
       analysis = { extension, decision: unsupported(extReason) };
     } else {
       const stopTimer = this.metrics.probeDuration.startTimer();
-      const input = file.remote ? this.readUrl(file) : file.absPath;
+      const handle = file.remote ? this.store?.open(file) : undefined;
+      const input = handle?.url ?? file.absPath;
       const outcome = await probeFile(input, this.rules, {
         ffprobePath: this.ffprobePath,
         extension,
         baseInputArgs: file.remote ? this.remoteInputArgs(input) : undefined,
         remote: file.remote,
-      });
+      }).finally(() => this.store?.release(handle?.id));
       stopTimer();
+      if (!outcome.ok && file.remote) {
+        // A remote probe can fail for a passing reason (a slow or unreachable origin):
+        // answered as unsupported now, but not remembered, so the next request tries again.
+        const failed: Analysis = { extension, decision: unsupported(`FFmpeg cannot read this file (${redact(outcome.error, file)}).`) };
+        this.metrics.probeResults.inc({ mode: "unsupported", extension: this.label(extension) });
+        log("warn", "unsupported_file", { path: file.relPath, reason: failed.decision.reason });
+        return failed;
+      }
       analysis = outcome.ok
         ? { extension, probe: outcome.probe, decision: decide(outcome.probe, extension, this.rules) }
         : { extension, decision: unsupported(`FFmpeg cannot read this file (${redact(outcome.error, file)}).`) };

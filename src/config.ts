@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { StoreConfig } from "./byte-store.ts";
 import { DEFAULT_CA_FILE, type RemoteConfig } from "./remote.ts";
 
 /** Runtime settings, read from environment variables. See README "Configuration". */
@@ -52,6 +53,8 @@ export interface Config {
   auth: AuthConfig;
   /** Playing tokens whose path is an http(s) URL. Off while allowedHosts is empty. */
   remote: RemoteConfig;
+  /** Where the bytes of remote files are kept (src/byte-store.ts). */
+  remoteStore: StoreConfig;
 }
 
 /** Algorithms a token may be signed with. Asymmetric only: wavy holds no signing key. */
@@ -158,6 +161,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       customCa: Boolean(env.REMOTE_CA_FILE),
       cacheUrl: cacheUrl || undefined,
       cacheTimeoutMs: int("REMOTE_CACHE_TIMEOUT_MS", 5_000, 1),
+    },
+    remoteStore: {
+      dir: str("REMOTE_STORE_DIR", join(tmpdir(), "wavy-remote-store")),
+      maxBytes: int("REMOTE_STORE_MAX_GB", 10, 1) * 1024 ** 3,
+      blockBytes: int("REMOTE_STORE_BLOCK_MB", 4, 1) * 1024 ** 2,
+      readAhead: int("REMOTE_STORE_READ_AHEAD", 4, 0),
+      fillConcurrency: int("REMOTE_STORE_FILL", 4, 0),
+      sweepIntervalMs: int("REMOTE_STORE_SWEEP_INTERVAL_MS", 60_000, 1),
     },
     auth: {
       mode: authMode,

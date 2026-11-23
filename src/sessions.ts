@@ -5,12 +5,13 @@ import { join } from "node:path";
 import type { Config } from "./config.ts";
 import type { Decision, PlaybackMode } from "./decide.ts";
 import { AviIndexer } from "./avi-index.ts";
+import { ByteStore, type StoreHandle } from "./byte-store.ts";
 import { buildHlsArgs, parseProgressSpeed, PLAYLIST_NAME } from "./hls.ts";
 import { ApiError } from "./http/errors.ts";
 import { log } from "./log.ts";
 import type { MediaFile } from "./media-path.ts";
 import type { Metrics } from "./metrics.ts";
-import { checkCache, readUrlOf, redactRemote, remoteInputArgs } from "./remote.ts";
+import { redactRemote, remoteInputArgs } from "./remote.ts";
 import { REMOTE_AVI_ARGS, type ProbeResult } from "./probe.ts";
 
 export type EncoderState = "none" | "running" | "done" | "failed";
@@ -42,12 +43,13 @@ export interface Session {
   /** Last FFmpeg error lines, when the encoder failed. */
   error?: string;
   proc?: Subprocess<"ignore", "pipe", "pipe">;
-  /** Remote AVI read through the rebuilt index (src/avi-index.ts): FFmpeg's input. */
-  aviInput?: { url: string; id: string };
+  /** A remote file's loopback input (src/byte-store.ts); `indexed` when it carries a rebuilt AVI index. */
+  remoteInput?: StoreHandle & { indexed: boolean };
 }
 
 /** A seek in a remote AVI waits this long for its index before falling back to a scan. */
 export const AVI_INDEX_WAIT_MS = 20_000;
+const AVI_INDEX_FILE = "avi-index";
 
 export interface CreateSessionInput {
   ownerId: string | null;
@@ -70,6 +72,8 @@ const isHls = (s: { mode: PlaybackMode }) => s.mode !== "direct" && s.mode !== "
 export class SessionManager {
   private readonly sessions = new Map<string, Session>();
   private readonly avi: AviIndexer;
+  /** Every read of a remote file goes through this store. */
+  readonly store: ByteStore;
   private reaper?: ReturnType<typeof setInterval>;
 
   constructor(
@@ -77,7 +81,11 @@ export class SessionManager {
     private readonly metrics: Metrics,
     private readonly now: () => number = Date.now,
   ) {
-    this.avi = new AviIndexer(cfg.remote);
+    this.store = new ByteStore(cfg.remoteStore, cfg.remote, metrics);
+    this.avi = new AviIndexer(cfg.remote, undefined, undefined, {
+      load: (file) => this.store.readAux(file, AVI_INDEX_FILE),
+      save: (file, bytes) => this.store.writeAux(file, AVI_INDEX_FILE, bytes),
+    });
     metrics.transcodeCapacity.set(cfg.maxTranscodes);
     this.refreshGauges();
   }
@@ -85,6 +93,7 @@ export class SessionManager {
   /** Clears segments left by a previous run and starts the idle reaper. */
   async init(): Promise<void> {
     await mkdir(this.cfg.sessionsDir, { recursive: true });
+    await this.store.init();
     for (const entry of await readdir(this.cfg.sessionsDir)) {
       await rm(join(this.cfg.sessionsDir, entry), { recursive: true, force: true });
     }
@@ -147,7 +156,7 @@ export class SessionManager {
     if (mode !== "direct") {
       try {
         await mkdir(session.dir, { recursive: true });
-        await this.prepareAvi(session);
+        await this.prepareInput(session);
         if (!this.sessions.has(id)) throw new ApiError(410, "session_ended", "The session ended while it was starting.");
         this.startEncoder(session);
       } catch (err) {
@@ -179,7 +188,7 @@ export class SessionManager {
     if (!this.sessions.has(session.id)) return; // stopped while we waited
     session.start = clampStart(position, session.probe.duration);
     session.error = undefined;
-    await this.prepareAvi(session);
+    await this.prepareInput(session);
     if (!this.sessions.has(session.id) || session.proc) return; // stopped, or another seek won
     this.startEncoder(session);
     log("info", "session_seek", { sessionId: session.id, path: session.relPath, start: session.start });
@@ -187,7 +196,8 @@ export class SessionManager {
 
   async stop(session: Session, cause: EndCause): Promise<void> {
     if (!this.sessions.delete(session.id)) return;
-    this.avi.release(session.aviInput?.id);
+    this.store.release(session.remoteInput?.id);
+    session.remoteInput = undefined;
     this.refreshGauges();
     this.metrics.sessionsEnded.inc({ cause });
     await this.killEncoder(session);
@@ -218,7 +228,7 @@ export class SessionManager {
   async shutdown(): Promise<void> {
     if (this.reaper) clearInterval(this.reaper);
     await Promise.all(this.list().map((s) => this.stop(s, "shutdown")));
-    this.avi.stop();
+    this.store.stop();
   }
 
   /**
@@ -248,24 +258,33 @@ export class SessionManager {
   }
 
   /**
+   * Remote files are read through the byte store, which also fetches the rest of the
+   * file in the background while the session is open.
+   *
    * Remote AVIs (probed with -use_odml 0) seek by reading the file from the start, so
-   * they get an index of their own (src/avi-index.ts). Its build starts with the
-   * session; a start at 0 doesn't wait for it, a seek does (up to AVI_INDEX_WAIT_MS).
+   * they get an index of their own (src/avi-index.ts), laid over the file by the store.
+   * Its build starts with the session; a start at 0 doesn't wait for it, a seek does
+   * (up to AVI_INDEX_WAIT_MS).
    */
-  private async prepareAvi(session: Session): Promise<void> {
-    if (!session.remoteFile || session.aviInput || !session.probe.inputArgs.includes(REMOTE_AVI_ARGS[0]!)) return;
-    this.avi.warm(session.remoteFile);
-    session.aviInput = (await this.avi.open(session.remoteFile, session.start > 0 ? AVI_INDEX_WAIT_MS : 0)) ?? undefined;
-    if (session.aviInput && !this.sessions.has(session.id)) this.avi.release(session.aviInput.id);
+  private async prepareInput(session: Session): Promise<void> {
+    const file = session.remoteFile;
+    if (!file) return;
+    const wantsIndex = session.probe.inputArgs.includes(REMOTE_AVI_ARGS[0]!);
+    if (session.remoteInput && (session.remoteInput.indexed || !wantsIndex)) return;
+    const index = wantsIndex ? await this.avi.get(file, session.start > 0 ? AVI_INDEX_WAIT_MS : 0) : null;
+    if (!this.sessions.has(session.id)) return;
+    if (session.remoteInput && !index) return;
+    const previous = session.remoteInput?.id;
+    session.remoteInput = { ...this.store.open(file, { fill: true, overlay: index ?? undefined }), indexed: Boolean(index) };
+    this.store.release(previous);
   }
 
   private startEncoder(session: Session): void {
     session.generation += 1;
-    // Remote files are re-resolved on every (re)start: a seek after the cache went
-    // down reads from the origin instead. A remote AVI with a rebuilt index is read
-    // from the loopback server, with FFmpeg's normal OpenDML index reading.
-    const input = session.aviInput?.url ?? (session.remoteFile ? readUrlOf(session.remoteFile, this.cfg.remote) : session.absPath);
-    const probe = session.aviInput ? { ...session.probe, inputArgs: withoutArgs(session.probe.inputArgs, REMOTE_AVI_ARGS) } : session.probe;
+    // Remote files are read from the byte store's loopback URL. With a rebuilt AVI
+    // index laid over the file, FFmpeg uses its normal OpenDML index reading.
+    const input = session.remoteInput?.url ?? session.absPath;
+    const probe = session.remoteInput?.indexed ? { ...session.probe, inputArgs: withoutArgs(session.probe.inputArgs, REMOTE_AVI_ARGS) } : session.probe;
     const args = buildHlsArgs(session.decision, probe, {
       input,
       inputProtocolArgs: session.remoteFile ? remoteInputArgs(this.cfg.remote, input) : undefined,
@@ -297,7 +316,6 @@ export class SessionManager {
       const lines = errText.trim().split("\n").slice(-3).join(" | ") || `ffmpeg exited with code ${code}`;
       // A remote URL's signature (the query) stays out of logs and API responses.
       session.error = session.remoteFile ? redactRemote(lines, session.remoteFile) : lines;
-      if (session.remoteFile?.cacheUrl && input === session.remoteFile.cacheUrl) void checkCache(this.cfg.remote);
       this.metrics.ffmpegFailures.inc({ mode: session.mode, extension: session.extension });
       log("error", "ffmpeg_failed", {
         sessionId: session.id,

@@ -7,7 +7,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AviIndexer, buildAviIndex } from "../src/avi-index.ts";
+import { AviIndexer, buildAviIndex, decodeAviIndex, encodeAviIndex } from "../src/avi-index.ts";
+import { ByteStore } from "../src/byte-store.ts";
 import { loadConfig } from "../src/config.ts";
 import type { MediaFile } from "../src/media-path.ts";
 import { writeOdmlAvi } from "./helpers/odml-avi.ts";
@@ -97,6 +98,7 @@ describe("buildAviIndex", () => {
 describe("AviIndexer (virtual file over loopback)", () => {
   const cfg = { ...loadConfig({}).remote, allowHttp: true, allowedHosts: ["127.0.0.1"] };
   let indexer: AviIndexer;
+  let store: ByteStore;
   let file: MediaFile;
   let url: string;
 
@@ -110,12 +112,14 @@ describe("AviIndexer (virtual file over loopback)", () => {
       mtimeMs: 0,
       remote: true,
     };
+    store = new ByteStore({ ...loadConfig({}).remoteStore, dir: join(dir, "store") }, cfg);
+    await store.init();
     indexer = new AviIndexer(cfg);
-    const opened = await indexer.open(file, 10_000);
-    expect(opened).not.toBeNull();
-    url = opened!.url;
+    const index = await indexer.get(file, 10_000);
+    expect(index).not.toBeNull();
+    url = store.open(file, { overlay: index! }).url;
   });
-  afterAll(() => indexer?.stop());
+  afterAll(() => store?.stop());
 
   test("decodes like the original: same streams, duration and frame count", async () => {
     const show = "-show_entries";
@@ -135,10 +139,30 @@ describe("AviIndexer (virtual file over loopback)", () => {
     }
   });
 
+  test("a built index survives being saved and loaded, and is refused for another file size", async () => {
+    const index = (await indexer.get(file, 0))!;
+    const back = decodeAviIndex(encodeAviIndex(index), file.size)!;
+    expect(back.chunks).toBe(index.chunks);
+    expect(Buffer.from(back.head).equals(Buffer.from(index.head))).toBe(true);
+    expect(Buffer.from(back.tail).equals(Buffer.from(index.tail))).toBe(true);
+    expect(decodeAviIndex(encodeAviIndex(index), file.size + 1)).toBeNull();
+  });
+
+  test("another pod loads the saved index instead of reading the file's index again", async () => {
+    let saved: Uint8Array | null = null;
+    const persist = { load: async () => saved, save: async (_f: MediaFile, b: Uint8Array) => void (saved = b) };
+    expect(await new AviIndexer(cfg, 16, undefined, persist).get(file, 10_000)).not.toBeNull();
+    await Bun.sleep(20);
+    expect(saved).not.toBeNull();
+    hits = [];
+    expect(await new AviIndexer(cfg, 16, undefined, persist).get(file, 10_000)).not.toBeNull();
+    expect(hits).toEqual([]);
+  });
+
   test("released URLs stop working", async () => {
-    const opened = (await indexer.open(file, 0))!;
+    const opened = store.open(file);
     expect((await fetch(opened.url, { headers: { Range: "bytes=0-3" } })).status).toBe(206);
-    indexer.release(opened.id);
+    store.release(opened.id);
     expect((await fetch(opened.url, { headers: { Range: "bytes=0-3" } })).status).toBe(404);
   });
 });

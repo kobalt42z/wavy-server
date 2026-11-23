@@ -9,18 +9,18 @@
  *
  * So wavy reads the index itself, once per file: the super index from the header,
  * then every ix chunk with small parallel range requests. It merges them into a few
- * big ix chunks and serves FFmpeg a virtual copy of the file from a loopback server:
+ * big ix chunks, and the byte store (byte-store.ts) serves FFmpeg a virtual copy of
+ * the file with them laid over it:
  *
  *   [header with the super index rewritten] [the original bytes ...] [merged ix chunks]
- *        from memory                          proxied from S3/cache     from memory
+ *        from memory                          from the byte store       from memory
  *
  * FFmpeg then opens the file with its normal OpenDML support: a handful of reads that
  * all hit memory, and every seek jumps straight to the right byte.
  */
-import { randomBytes } from "node:crypto";
 import { log } from "./log.ts";
 import type { MediaFile } from "./media-path.ts";
-import { fetchOriginRange, fetchRemote, type RemoteConfig } from "./remote.ts";
+import { fetchOriginRange, type RemoteConfig } from "./remote.ts";
 
 export interface AviIndex {
   /** Original file size. */
@@ -273,30 +273,65 @@ export async function buildAviIndex(read: RangeReader, size: number): Promise<Av
   return { size, head: patched, tail, chunks: wanted.length };
 }
 
-interface Registration {
-  index: AviIndex;
-  file: MediaFile;
+/** Where built indexes are kept between sessions and pods (the byte store's folder). */
+export interface IndexPersistence {
+  load(file: MediaFile): Promise<Uint8Array | null>;
+  save(file: MediaFile, bytes: Uint8Array): Promise<void>;
+}
+
+const MAGIC = 0x31495641; // "AVI1"
+
+export function encodeAviIndex(index: AviIndex): Uint8Array {
+  const out = new Uint8Array(20 + index.head.length + index.tail.length);
+  const v = new DataView(out.buffer);
+  v.setUint32(0, MAGIC, true);
+  v.setFloat64(4, index.size, true);
+  v.setUint32(12, index.chunks, true);
+  v.setUint32(16, index.head.length, true);
+  out.set(index.head, 20);
+  out.set(index.tail, 20 + index.head.length);
+  return out;
+}
+
+export function decodeAviIndex(bytes: Uint8Array, size: number): AviIndex | null {
+  if (bytes.length < 20) return null;
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const headLen = v.getUint32(16, true);
+  if (v.getUint32(0, true) !== MAGIC || v.getFloat64(4, true) !== size || 20 + headLen > bytes.length) return null;
+  return { size, chunks: v.getUint32(12, true), head: bytes.slice(20, 20 + headLen), tail: bytes.slice(20 + headLen) };
 }
 
 /**
- * Builds and caches AVI indexes for remote files, and serves the virtual files to
- * FFmpeg from a server on 127.0.0.1 (never reachable from outside the pod).
+ * Builds AVI indexes for remote files and remembers them: in memory for this pod, and
+ * through `persist` for the other pods and later runs.
  */
 export class AviIndexer {
   private readonly indexes = new Map<string, Promise<AviIndex | null>>();
   private readonly ready = new Map<string, AviIndex | null>();
-  private readonly regs = new Map<string, Registration>();
-  private server?: ReturnType<typeof Bun.serve>;
 
   constructor(
-    private readonly cfg: RemoteConfig,
+    cfg: RemoteConfig,
     private readonly cacheSize = 16,
-    /** How the index is read; tests and the default read the origin directly. */
+    /** How the index is read: small parallel ranges straight from the origin. */
     private readonly reader: (file: MediaFile) => RangeReader = (file) => withRetry((start, end) => fetchOriginRange(file, cfg, start, end)),
+    private readonly persist?: IndexPersistence,
   ) {}
 
   private key(file: MediaFile): string {
     return `${file.relPath}\0${file.size}\0${file.mtimeMs}\0${file.etag ?? ""}`;
+  }
+
+  private async build(file: MediaFile): Promise<AviIndex | null> {
+    const saved = await this.persist?.load(file).catch(() => null);
+    const kept = saved ? decodeAviIndex(saved, file.size) : null;
+    if (kept) return kept;
+    const started = Date.now();
+    const index = await buildAviIndex(this.reader(file), file.size);
+    if (index) {
+      log("info", "avi_index_built", { path: file.relPath, chunks: index.chunks, indexBytes: index.tail.length, ms: Date.now() - started });
+      void this.persist?.save(file, encodeAviIndex(index)).catch(() => {});
+    }
+    return index;
   }
 
   /** Starts building the index in the background (no-op when it's built or building). */
@@ -309,18 +344,9 @@ export class AviIndexer {
       this.indexes.set(key, p);
       return p;
     }
-    const started = Date.now();
-    p = buildAviIndex(this.reader(file), file.size).then(
+    p = this.build(file).then(
       (index) => {
         this.ready.set(key, index);
-        if (index) {
-          log("info", "avi_index_built", {
-            path: file.relPath,
-            chunks: index.chunks,
-            indexBytes: index.tail.length,
-            ms: Date.now() - started,
-          });
-        }
         return index;
       },
       (err) => {
@@ -340,101 +366,17 @@ export class AviIndexer {
   }
 
   /**
-   * A loopback URL FFmpeg can read with full seeking, or null to read the file as
-   * before. With `waitMs` 0 it only uses an index that's already built (a start at 0
-   * needs no index); otherwise it waits up to `waitMs` for the build.
+   * The file's index, or null to read the file without one. With `waitMs` 0 only an
+   * index that's already built is returned (a start at 0 needs none); otherwise it
+   * waits up to `waitMs` for the build.
    */
-  async open(file: MediaFile, waitMs: number): Promise<{ url: string; id: string } | null> {
+  async get(file: MediaFile, waitMs: number): Promise<AviIndex | null> {
     const key = this.key(file);
     const p = this.warm(file);
     let index = this.ready.get(key);
     if (index === undefined && waitMs > 0) {
       index = await Promise.race([p, Bun.sleep(waitMs).then(() => undefined)]);
     }
-    if (!index) return null;
-    const id = randomBytes(18).toString("base64url");
-    this.regs.set(id, { index, file });
-    const name = encodeURIComponent(file.relPath.split("/").pop() || "file.avi");
-    return { url: `http://127.0.0.1:${this.listen()}/v/${id}/${name}`, id };
-  }
-
-  release(id: string | undefined): void {
-    if (id) this.regs.delete(id);
-  }
-
-  stop(): void {
-    this.server?.stop(true);
-    this.server = undefined;
-    this.regs.clear();
-  }
-
-  private listen(): number {
-    this.server ??= Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      idleTimeout: 0,
-      fetch: (req) => this.serve(req),
-    });
-    return this.server.port!;
-  }
-
-  private async serve(req: Request): Promise<Response> {
-    const m = /^\/v\/([A-Za-z0-9_-]+)\//.exec(new URL(req.url).pathname);
-    const reg = m ? this.regs.get(m[1]!) : undefined;
-    if (!reg || (req.method !== "GET" && req.method !== "HEAD")) return new Response(null, { status: 404 });
-    const { index, file } = reg;
-    const total = index.size + index.tail.length;
-    const r = /^bytes=(\d+)-(\d*)$/.exec(req.headers.get("range") ?? "");
-    const start = r ? Number(r[1]) : 0;
-    const end = r && r[2] ? Math.min(Number(r[2]), total - 1) : total - 1;
-    if (start >= total || start > end) {
-      return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${total}` } });
-    }
-    const headers = {
-      "Accept-Ranges": "bytes",
-      "Content-Type": "video/x-msvideo",
-      "Content-Length": String(end - start + 1),
-      ...(r ? { "Content-Range": `bytes ${start}-${end}/${total}` } : {}),
-    };
-    if (req.method === "HEAD") return new Response(null, { status: r ? 206 : 200, headers });
-
-    const cfg = this.cfg;
-    async function* parts(): AsyncGenerator<Uint8Array> {
-      const headLen = index.head.length;
-      if (start < headLen) yield index.head.subarray(start, Math.min(end + 1, headLen));
-      const midStart = Math.max(start, headLen);
-      const midEnd = Math.min(end, index.size - 1);
-      if (midStart <= midEnd) {
-        const res = await fetchRemote(file, cfg, { start: midStart, end: midEnd });
-        const reader = res.body!.getReader();
-        try {
-          for (;;) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            yield value;
-          }
-        } finally {
-          await reader.cancel().catch(() => {});
-        }
-      }
-      const tailStart = Math.max(start, index.size);
-      if (tailStart <= end) yield index.tail.subarray(tailStart - index.size, end - index.size + 1);
-    }
-    const it = parts();
-    const body = new ReadableStream<Uint8Array>({
-      async pull(c) {
-        try {
-          const { value, done } = await it.next();
-          if (done) c.close();
-          else c.enqueue(value);
-        } catch (err) {
-          c.error(err);
-        }
-      },
-      async cancel() {
-        await it.return(undefined);
-      },
-    });
-    return new Response(body, { status: r ? 206 : 200, headers });
+    return index ?? null;
   }
 }

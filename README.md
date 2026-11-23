@@ -135,9 +135,49 @@ browser's Range requests passed on.
   hands FFmpeg a virtual copy of the file from a loopback server on 127.0.0.1: the header
   and merged index from memory, the media bytes from S3 (or the cache). Seeks then jump
   straight to the right byte. The build starts with the session; a seek waits for it (up
-  to 20 s) instead of scanning. Indexes of the last 16 files are kept in memory.
-- The link must stay valid for the whole session: a seek or a transcode restart opens it
-  again. Presign for at least `SESSION_MAX_AGE_MS`, or as long as a viewing can last.
+  to 20 s) instead of scanning. Indexes of the last 16 files are kept in memory, and every built index is saved in the block store for the other pods.
+- The link must stay valid until the file is fully fetched: until then a seek may need
+  blocks that aren't stored yet. Presigning for `SESSION_MAX_AGE_MS` is always safe.
+
+### Remote block store
+
+FFmpeg and ffprobe never read a remote file from its URL. They read a loopback address
+inside the pod, served by wavy's byte store (`src/byte-store.ts`), which decides how the
+bytes are fetched and kept:
+
+- The file is cut into blocks (`REMOTE_STORE_BLOCK_MB`, 4 MB). Each block is fetched
+  once and kept as a file under `REMOTE_STORE_DIR`.
+- Every read warms the next blocks, so a file FFmpeg reads at two places at once
+  (audio stored far from video) costs two sequential streams, not a request per packet.
+- While a session is open, the rest of the file is fetched in the background
+  (`REMOTE_STORE_FILL` requests at a time), nearest to the play position first. After
+  that, seeks read nothing from the origin.
+- Rebuilt AVI indexes are kept there too, so only the first pod to open a file builds it.
+- When the folder is over `REMOTE_STORE_MAX_GB`, the least recently used files are
+  dropped. A file that would take more than half of it is read on demand, without the
+  background fill.
+
+Put `REMOTE_STORE_DIR` on a volume shared by all pods (`ReadWriteMany`) and every pod
+uses the blocks any pod fetched, including for a newly signed link to the same object.
+The folder must be writable by the container's user (set `fsGroup` on the pod). If it
+can't be written, playback still works: blocks are served straight from the fetch.
+
+```yaml
+# Deployment: mount the shared volume and point wavy at it
+env:
+  - { name: REMOTE_STORE_DIR, value: /var/cache/wavy }
+  - { name: REMOTE_STORE_MAX_GB, value: "90" }   # leave headroom under the volume's size
+volumeMounts:
+  - { name: remote-store, mountPath: /var/cache/wavy }
+volumes:
+  - name: remote-store
+    persistentVolumeClaim: { claimName: <your shared PVC> }
+```
+
+Wavy still sends the origin one 1-byte request each time a file is opened. That request
+refuses an expired or forged link even when every block is already stored. Each release
+of a file logs `remote_read` with the requests FFmpeg made and the blocks fetched: many
+requests for few bytes means a layout that seeks a lot.
 
 ### S3 slice cache
 
@@ -190,6 +230,9 @@ wavy never guesses a missing folder.
 | `wavy_ffmpeg_failures_total{mode,extension}` | FFmpeg exits with an error. |
 | `wavy_ffmpeg_speed{mode}` | Histogram of FFmpeg speed (x real time); below 1 stalls. |
 | `wavy_probe_duration_seconds`, `wavy_probe_results_total{mode,extension}` | ffprobe timing and outcomes. |
+| `wavy_remote_blocks_total{source}` | Blocks of remote files read: `origin` (fetched) or `store` (already kept). |
+| `wavy_remote_bytes_fetched_total` | Bytes fetched from remote origins. |
+| `wavy_remote_store_bytes` | Size of `REMOTE_STORE_DIR` at the last check. |
 
 Plus the default process metrics, prefixed `wavy_`.
 
@@ -227,6 +270,11 @@ Plus the default process metrics, prefixed `wavy_`.
 | `REMOTE_ALLOW_HTTP` | `false` | Also allow plain `http://` URLs (an in-cluster MinIO, for example). |
 | `REMOTE_TIMEOUT_MS` | `15000` | Timeout for opening a remote file and for each stalled read. |
 | `REMOTE_CA_FILE` | `/etc/ssl/certs/ca-certificates.crt` | CA bundle for https sources. Set it for a private CA. |
+| `REMOTE_STORE_DIR` | `<tmp>/wavy-remote-store` | Folder for the blocks of remote files ("Remote block store" above). Use a volume shared by all pods. |
+| `REMOTE_STORE_MAX_GB` | `10` | The folder is kept under this size; least recently used files go first. |
+| `REMOTE_STORE_BLOCK_MB` | `4` | Block size. Don't change it on a folder that already holds blocks. |
+| `REMOTE_STORE_READ_AHEAD` | `4` | Blocks warmed after the one being read, at most. |
+| `REMOTE_STORE_FILL` | `4` | Background requests fetching the rest of an open file. `0` turns the fill off. |
 | `REMOTE_CACHE_URL` | | Slice cache for remote files, e.g. `http://wavy-cache:8080` ("S3 slice cache" below). Empty reads the origin directly. |
 | `REMOTE_CACHE_TIMEOUT_MS` | `5000` | How long to wait for the cache before reading the origin instead. |
 | `MEDIA_PATH_PREFIXES` | | Other spellings of the share root, stripped from the front of paths. |
