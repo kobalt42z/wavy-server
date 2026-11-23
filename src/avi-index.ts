@@ -41,7 +41,7 @@ const AVI_INDEX_OF_CHUNKS = 1;
 /** Largest header we read (hdrl with its reserved super index space is usually < 64 KB). */
 const MAX_HEADER = 4 * 1024 * 1024;
 /** Range requests in flight while reading ix chunks. */
-const CONCURRENCY = 48;
+const CONCURRENCY = 96;
 /** ix chunks closer than this are read with one request. */
 const MERGE_GAP = 64 * 1024;
 const MERGE_MAX = 2 * 1024 * 1024;

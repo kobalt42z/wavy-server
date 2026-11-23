@@ -130,8 +130,8 @@ browser's Range requests passed on.
   out the probe.
 - Without that index FFmpeg would seek by reading the file up to the target (gigabytes
   for a seek late in a long file). So for a playback session wavy reads the index itself,
-  once per file (super index from the header, then every chunk with ~48 parallel range
-  requests, a few seconds for an hour of video), merges it into one chunk per stream and
+  once per file (super index from the header, then every chunk with ~96 parallel range
+  requests: about 4 s for an hour of video at 50 ms per request), merges it into one chunk per stream and
   hands FFmpeg a virtual copy of the file from a loopback server on 127.0.0.1: the header
   and merged index from memory, the media bytes from S3 (or the cache). Seeks then jump
   straight to the right byte. The build starts with the session; a seek waits for it (up
