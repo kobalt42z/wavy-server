@@ -251,8 +251,21 @@ export async function serveRemote(file: MediaFile, req: Request, cfg: RemoteConf
     return new Response(null, { status: 200, headers });
   }
 
-  const upstreamRange = range.kind === "partial" ? `bytes=${range.start}-${range.end}` : undefined;
-  const rangeHeader: Record<string, string> = upstreamRange ? { Range: upstreamRange } : {};
+  const res = await fetchRemote(file, cfg, range.kind === "partial" ? { start: range.start, end: range.end } : undefined);
+  for (const h of ["content-length", "content-range"]) {
+    const v = res.headers.get(h);
+    if (v) headers.set(h, v);
+  }
+  return new Response(res.body, { status: res.status, headers });
+}
+
+/**
+ * Reads a remote file, or the inclusive byte range [start, end] of it: through the
+ * cache when there is one, from the origin when the cache is down. Returns the 200/206
+ * response; throws 502 for a refused link or any other answer.
+ */
+export async function fetchRemote(file: MediaFile, cfg: RemoteConfig, range?: { start: number; end: number }): Promise<Response> {
+  const rangeHeader: Record<string, string> = range ? { Range: `bytes=${range.start}-${range.end}` } : {};
   let res: Response | undefined;
   const viaCache = readUrlOf(file, cfg);
   if (viaCache !== file.absPath) {
@@ -280,11 +293,19 @@ export async function serveRemote(file: MediaFile, req: Request, cfg: RemoteConf
     await res.body?.cancel();
     throw new ApiError(502, "remote_unavailable", `The media server answered HTTP ${res.status}.`);
   }
-  for (const h of ["content-length", "content-range"]) {
-    const v = res.headers.get(h);
-    if (v) headers.set(h, v);
+  return res;
+}
+
+/** Reads the inclusive byte range [start, end] of a remote file straight from the origin. */
+export async function fetchOriginRange(file: MediaFile, cfg: RemoteConfig, start: number, end: number): Promise<Uint8Array> {
+  const res = await remoteFetch(file.absPath, cfg, { Range: `bytes=${start}-${end}` });
+  if (res.status !== 206) {
+    await res.body?.cancel();
+    throw new ApiError(502, "remote_unavailable", `The media server answered HTTP ${res.status} to a range request.`);
   }
-  return new Response(res.body, { status: res.status, headers });
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  if (bytes.length !== end - start + 1) throw new ApiError(502, "remote_unavailable", "The media server sent a short range.");
+  return bytes;
 }
 
 /**
@@ -296,8 +317,10 @@ export function remoteInputArgs(cfg: RemoteConfig, url: string): string[] {
   const tls = /^https:/i.test(url) ? ["-tls_verify", "1", "-ca_file", cfg.caFile] : [];
   // The in-cluster cache is usually plain http even when origins must be https.
   const viaCache = Boolean(cfg.cacheUrl) && url.startsWith(cfg.cacheUrl!.replace(/\/+$/, "") + "/");
+  // wavy's own loopback server for AVI files with a rebuilt index (src/avi-index.ts).
+  const loopback = url.startsWith(`http://127.0.0.1:`);
   return [
-    "-protocol_whitelist", cfg.allowHttp || viaCache ? "https,tls,tcp,http" : "https,tls,tcp",
+    "-protocol_whitelist", cfg.allowHttp || viaCache || loopback ? "https,tls,tcp,http" : "https,tls,tcp",
     ...tls,
     "-reconnect", "1",
     "-reconnect_on_network_error", "1",

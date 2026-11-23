@@ -52,6 +52,17 @@ beforeAll(async () => {
   extra = mkdtempSync(join(tmpdir(), "wavy-remote-extra-"));
   // DVR-style OpenDML AVI: an index chunk per video frame per stream, no idx1.
   writeOdmlAvi(join(samples, "video/avi_h264_g711.avi"), join(extra, "dvr.avi"), 1);
+  // A minute-long one (keyframe every second, index chunk every second) for seeking.
+  const long = join(extra, "long-src.avi");
+  const ff = Bun.spawnSync([
+    "ffmpeg", "-v", "error", "-y",
+    "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=60",
+    "-f", "lavfi", "-i", "sine=d=60",
+    "-c:v", "libx264", "-preset", "ultrafast", "-g", "25", "-b:v", "2M", "-pix_fmt", "yuv420p",
+    "-c:a", "pcm_alaw", "-ar", "8000", "-ac", "1", long,
+  ]);
+  if (ff.exitCode !== 0) throw new Error(ff.stderr.toString());
+  writeOdmlAvi(long, join(extra, "dvr-long.avi"), 25);
 
   const kp = await generateKeyPair("EdDSA", { crv: "Ed25519" });
   priv = kp.privateKey;
@@ -183,6 +194,31 @@ describe("a token with an http(s) URL plays from that URL", () => {
     expect((await fetch(srv.base + ((await seek.json()) as { url: string }).url)).status).toBe(200);
     expect(s3Hits.length).toBeLessThan(20);
     await fetch(`${srv.base}/api/sessions/${s.sessionId}`, { method: "DELETE" });
+  }, 60_000);
+
+  test("AVI with a split OpenDML index: a seek jumps to the right byte instead of reading up to it", async () => {
+    const url = signed("extra/dvr-long.avi");
+    const size = Bun.file(join(extra, "dvr-long.avi")).size;
+    const res = await post(`${srv.base}/api/sessions`, {}, await token(url));
+    expect(res.status).toBe(201);
+    const s = (await res.json()) as { sessionId: string; url: string; mode: string };
+    expect(s.mode).toBe("transcode-audio");
+    expect(await (await fetch(srv.base + s.url)).text()).toContain("#EXTINF");
+
+    s3Hits = [];
+    const seek = await post(`${srv.base}/api/sessions/${s.sessionId}/seek`, { position: 50 });
+    expect(seek.status).toBe(200);
+    const pl = await fetch(srv.base + ((await seek.json()) as { url: string }).url);
+    expect(await pl.text()).toContain("#EXTINF");
+    await fetch(`${srv.base}/api/sessions/${s.sessionId}`, { method: "DELETE" });
+
+    // With the index FFmpeg's read starts at 50 s (about 5/6 into the file). Without it,
+    // FFmpeg reads from the start of the data up to 50 s, and nothing starts there.
+    const reads = s3Hits
+      .map((h) => /^bytes=(\d+)-(\d*)$/.exec(h.range ?? ""))
+      .filter((m): m is RegExpExecArray => m !== null && (!m[2] || Number(m[2]) - Number(m[1]) > 256 * 1024))
+      .map((m) => Number(m[1]) / size);
+    expect(reads.some((at) => at > 0.75 && at < 0.9)).toBe(true);
   }, 60_000);
 
   test("probe works with the token's URL and shows no signature", async () => {
