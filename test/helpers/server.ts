@@ -34,7 +34,10 @@ export interface TestServer {
 /** Starts the real app on a random port, with its own sessions folder. */
 export async function startServer(mediaRoot: string, overrides: Partial<Config> = {}): Promise<TestServer> {
   const sessionsDir = mkdtempSync(join(tmpdir(), "wavy-sessions-"));
-  const config: Config = { ...loadConfig({}), mediaRoot, sessionsDir, port: 0, ...overrides };
+  const base = loadConfig({});
+  // Its own block store too, so one test's remote reads are never another's cache hits.
+  const remoteStore = { ...base.remoteStore, dir: join(sessionsDir, "..", `${sessionsDir.split("/").pop()}-store`) };
+  const config: Config = { ...base, mediaRoot, sessionsDir, remoteStore, port: 0, ...overrides };
   const metrics = createMetrics();
   const sessions = new SessionManager(config, metrics);
   await sessions.init();
@@ -49,6 +52,7 @@ export async function startServer(mediaRoot: string, overrides: Partial<Config> 
       await server.stop(true);
       await sessions.shutdown();
       rmSync(sessionsDir, { recursive: true, force: true });
+      rmSync(config.remoteStore.dir, { recursive: true, force: true });
     },
   };
 }

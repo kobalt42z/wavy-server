@@ -197,28 +197,51 @@ describe("a token with an http(s) URL plays from that URL", () => {
   }, 60_000);
 
   test("AVI with a split OpenDML index: a seek jumps to the right byte instead of reading up to it", async () => {
-    const url = signed("extra/dvr-long.avi");
-    const size = Bun.file(join(extra, "dvr-long.avi")).size;
-    const res = await post(`${srv.base}/api/sessions`, {}, await token(url));
-    expect(res.status).toBe(201);
-    const s = (await res.json()) as { sessionId: string; url: string; mode: string };
-    expect(s.mode).toBe("transcode-audio");
-    expect(await (await fetch(srv.base + s.url)).text()).toContain("#EXTINF");
+    // Small blocks and no background fill, so the origin sees exactly where FFmpeg reads.
+    const storeDir = mkdtempSync(join(tmpdir(), "wavy-remote-store-"));
+    const own = await startServer(media, {
+      auth: auth(),
+      remote: srv.config.remote,
+      remoteStore: { ...srv.config.remoteStore, dir: storeDir, blockBytes: 256 * 1024, readAhead: 1, fillConcurrency: 0 },
+    });
+    try {
+      const url = signed("extra/dvr-long.avi");
+      const size = Bun.file(join(extra, "dvr-long.avi")).size;
+      s3Hits = [];
+      const res = await post(`${own.base}/api/sessions`, { start: 50 }, await token(url));
+      expect(res.status).toBe(201);
+      const s = (await res.json()) as { sessionId: string; url: string; mode: string };
+      expect(s.mode).toBe("transcode-audio");
+      expect(await (await fetch(own.base + s.url)).text()).toContain("#EXTINF");
+      await fetch(`${own.base}/api/sessions/${s.sessionId}`, { method: "DELETE" });
 
+      // With the index FFmpeg's read starts at 50 s (about 5/6 into the file). Without it,
+      // FFmpeg reads from the start of the data up to 50 s. (Smaller reads are the index.)
+      const reads = s3Hits
+        .map((h) => /^bytes=(\d+)-(\d+)$/.exec(h.range ?? ""))
+        .filter((m): m is RegExpExecArray => m !== null && Number(m[2]) - Number(m[1]) >= 128 * 1024)
+        .map((m) => Number(m[1]) / size);
+      expect(reads.some((at) => at > 0.75 && at < 0.9)).toBe(true);
+      // (ffprobe reads the first few megabytes to analyse the streams.)
+      expect(reads.filter((at) => at > 0.4 && at < 0.7)).toEqual([]);
+    } finally {
+      await own.close();
+      rmSync(storeDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("a second viewer of the same object, with a newly signed link, reads it from the store", async () => {
+    const key = "video/ts_h264_aac.ts";
+    const play = async (link: string) => {
+      const s = (await (await post(`${srv.base}/api/sessions`, {}, await token(link))).json()) as { sessionId: string; url: string };
+      expect(await (await fetch(srv.base + s.url)).text()).toContain("#EXTINF");
+      await fetch(`${srv.base}/api/sessions/${s.sessionId}`, { method: "DELETE" });
+    };
+    await play(`${signed(key)}&viewer=1`);
     s3Hits = [];
-    const seek = await post(`${srv.base}/api/sessions/${s.sessionId}/seek`, { position: 50 });
-    expect(seek.status).toBe(200);
-    const pl = await fetch(srv.base + ((await seek.json()) as { url: string }).url);
-    expect(await pl.text()).toContain("#EXTINF");
-    await fetch(`${srv.base}/api/sessions/${s.sessionId}`, { method: "DELETE" });
-
-    // With the index FFmpeg's read starts at 50 s (about 5/6 into the file). Without it,
-    // FFmpeg reads from the start of the data up to 50 s, and nothing starts there.
-    const reads = s3Hits
-      .map((h) => /^bytes=(\d+)-(\d*)$/.exec(h.range ?? ""))
-      .filter((m): m is RegExpExecArray => m !== null && (!m[2] || Number(m[2]) - Number(m[1]) > 256 * 1024))
-      .map((m) => Number(m[1]) / size);
-    expect(reads.some((at) => at > 0.75 && at < 0.9)).toBe(true);
+    await play(`${signed(key)}&viewer=2`);
+    // Only the one-byte open that checks the link; every byte FFmpeg reads is stored.
+    expect(s3Hits.map((h) => h.range)).toEqual(["bytes=0-0"]);
   }, 60_000);
 
   test("probe works with the token's URL and shows no signature", async () => {

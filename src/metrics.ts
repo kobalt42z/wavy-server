@@ -67,6 +67,22 @@ export function createMetrics() {
       buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30],
       registers: [registry],
     }),
+    remoteBlocks: new Counter({
+      name: "wavy_remote_blocks_total",
+      help: "Blocks of remote files read, by where they came from (origin = fetched, store = already kept).",
+      labelNames: ["source"] as const,
+      registers: [registry],
+    }),
+    remoteBytesFetched: new Counter({
+      name: "wavy_remote_bytes_fetched_total",
+      help: "Bytes of remote files fetched from their origin.",
+      registers: [registry],
+    }),
+    remoteStoreBytes: new Gauge({
+      name: "wavy_remote_store_bytes",
+      help: "Size of the remote block store folder (REMOTE_STORE_DIR), as of the last check.",
+      registers: [registry],
+    }),
     probeResults: new Counter({
       name: "wavy_probe_results_total",
       help: "Files probed, by chosen mode and file extension.",
